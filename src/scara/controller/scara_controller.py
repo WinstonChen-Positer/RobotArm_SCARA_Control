@@ -1,0 +1,548 @@
+"""
+SCARA 机械臂控制器（常驻服务版）
+
+启动 ``snrobot.exe serve`` 保持单连接，从 stdin 逐行下发命令、读到 ``<<END>>`` 为止。
+好处：低延迟、连续点动可用（jog 开/停走同一连接）、进程退出/断开自动停机不跑飞。
+同步核心方法可脱离 Qt 直接测试；Qt 层用后台线程轮询状态并发信号，避免界面卡顿。
+"""
+
+from __future__ import annotations
+
+import json
+import queue
+import subprocess
+import threading
+import time
+from pathlib import Path
+from typing import Optional, Tuple, List
+
+from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal, QRunnable, QThreadPool
+
+from utils import get_logger
+from scara.config.scara_config import ScaraConfig
+from scara.controller.relay_controller import ScaraRelayController
+
+logger = get_logger("scara.controller")
+
+CART_AXIS = {"X": 7, "Y": 8, "Z": 9}
+JOINT_AXIS = {1: 1, 2: 2, 3: 3, 4: 4}
+MODE_CODE = {"T1": 1, "T2": 2, "Execute": 3}
+DIR_CODE = {"+": 1, "-": 2}   # Forward / Reverse
+PRESET_FILE = "scara_presets.json"
+
+
+class ScaraController(QObject):
+    """SCARA 控制器：常驻 serve 进程 + 状态信号。"""
+
+    # snrobot.exe 是黑盒，任何一次交互都必须有上限，否则无人值守流程会永久挂起。
+    # 单条命令上限按"最慢的一次整臂移动"留余量；握手另给一个较短的上限。
+    SEND_TIMEOUT_S = 120.0
+    CONNECT_TIMEOUT_S = 30.0
+
+    connection_changed = pyqtSignal(bool)
+    status_updated = pyqtSignal(dict)
+    error_occurred = pyqtSignal(str)
+    warning_occurred = pyqtSignal(str)
+    info_occurred = pyqtSignal(str)
+    command_finished = pyqtSignal(str, bool, str)
+    presets_changed = pyqtSignal(list)          # 预设点名称列表变化
+
+    def __init__(self, config: Optional[ScaraConfig] = None, parent: Optional[QObject] = None):
+        super().__init__(parent)
+        self._cfg = config or ScaraConfig()
+        self._proc: Optional[subprocess.Popen] = None
+        self._io_lock = threading.Lock()        # 串行化对 serve 进程的读写
+        self._connected = False
+        self._connecting = False                 # connect_async 在途标志，防重入起双进程
+        self._last_status: dict = {}
+        self._pool = QThreadPool.globalInstance()
+        self._poller: Optional["_PollThread"] = None
+        self._presets: dict = {}
+        self._load_presets()
+        # 连续点动"续命"定时器：按住期间周期性重发 jog，避免控制器看门狗约1s自动停
+        self._jog_active: Optional[tuple] = None   # (code, dir, world)
+        self._jog_timer = QTimer(self); self._jog_timer.setInterval(600)
+        self._jog_timer.timeout.connect(self._jog_heartbeat)
+        # serve 进程输出队列 + 常驻读取线程（见 _send：防止黑盒 exe 卡死导致永久挂起）
+        self._rx: "queue.Queue[Optional[str]]" = queue.Queue()
+        self._rx_thread: Optional[threading.Thread] = None
+        # SCARA 工位电磁阀/泵继电器控制器
+        self._relay = ScaraRelayController()
+        self._relay_connected = False
+
+    # ------------------------------------------------------------------ #
+    #  serve 进程读写
+    # ------------------------------------------------------------------ #
+    def _send(self, line: str, timeout: Optional[float] = None) -> str:
+        """向 serve 进程发一条命令，读到 <<END>> 返回其间输出。失败返回 ''。
+
+        超时返回含 "TIMEOUT" 的字符串 —— `_ok()` 已把 TIMEOUT 列为失败关键词，
+        `read_all_sync()` 也会因缺 "JOINT" 返回 None，所以走的是既有失败通路。
+
+        原实现直接 `for raw in p.stdout` 阻塞读，snrobot.exe 一旦卡死或不回
+        `<<END>>`，整条无人值守流程会永久挂起且不抛异常、不记日志。改为由常驻
+        读取线程喂队列 + 带 deadline 取队列（Windows 上管道没法 select，只能这么做）。
+        """
+        budget = float(timeout if timeout is not None else self.SEND_TIMEOUT_S)
+        with self._io_lock:
+            p = self._proc
+            if p is None or p.poll() is not None:
+                return ""
+            # 丢弃上一条命令超时后迟到的残留行，避免串到本次结果里
+            while True:
+                try:
+                    self._rx.get_nowait()
+                except queue.Empty:
+                    break
+            try:
+                p.stdin.write(line + "\n")
+                p.stdin.flush()
+            except Exception as exc:
+                logger.warning("serve 写入失败: %s", exc)
+                return ""
+
+            out: List[str] = []
+            deadline = time.monotonic() + budget
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.error(
+                        "serve 命令 %r 超时（%.1fs 未收到 <<END>>），已收到 %d 行",
+                        line, budget, len(out),
+                    )
+                    return "TIMEOUT: snrobot serve 未在 %.1fs 内响应 %r" % (budget, line)
+                try:
+                    item = self._rx.get(timeout=min(remaining, 0.5))
+                except queue.Empty:
+                    if p.poll() is not None:
+                        logger.error("serve 进程已退出（命令 %r 未完成）", line)
+                        return "CONNECT_FAIL: snrobot serve 进程已退出"
+                    continue
+                if item is None:            # 读取线程报告 stdout 已关闭
+                    logger.error("serve stdout 已关闭（命令 %r 未完成）", line)
+                    return "CONNECT_FAIL: snrobot serve 输出已关闭"
+                if item == "<<END>>":
+                    return "\n".join(out)
+                out.append(item)
+
+    def _rx_pump(self, proc: subprocess.Popen) -> None:
+        """常驻读取线程：把 serve 的 stdout 逐行喂进队列，结束时压入 None。"""
+        try:
+            for raw in proc.stdout:
+                self._rx.put(raw.rstrip("\n"))
+        except Exception as exc:  # pragma: no cover - 进程被杀时正常发生
+            logger.debug("serve 读取线程结束: %s", exc)
+        finally:
+            self._rx.put(None)
+
+    def _start_proc(self) -> bool:
+        try:
+            self._proc = subprocess.Popen(
+                [self._cfg.exe_path, "serve"], cwd=self._cfg.exe_dir,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception as exc:
+            self.error_occurred.emit(f"启动 snrobot.exe 失败: {exc}")
+            return False
+
+        # 读取线程随进程一起起；握手也走队列 —— 原来直接 for raw in stdout 读握手，
+        # exe 起来了但不吐 SERVE_READY 时会卡死在连接这一步。
+        self._rx = queue.Queue()
+        self._rx_thread = threading.Thread(
+            target=self._rx_pump, args=(self._proc,),
+            name="scara-serve-rx", daemon=True,
+        )
+        self._rx_thread.start()
+
+        deadline = time.monotonic() + self.CONNECT_TIMEOUT_S
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.error("snrobot serve 在 %.0fs 内未返回 SERVE_READY", self.CONNECT_TIMEOUT_S)
+                self.error_occurred.emit(
+                    f"snrobot serve 启动超时（{self.CONNECT_TIMEOUT_S:.0f}s 未就绪）")
+                return False
+            try:
+                item = self._rx.get(timeout=min(remaining, 0.5))
+            except queue.Empty:
+                if self._proc.poll() is not None:
+                    self.error_occurred.emit("snrobot serve 进程启动后立即退出")
+                    return False
+                continue
+            if item is None:
+                self.error_occurred.emit("snrobot serve 输出已关闭")
+                return False
+            s = item.strip()
+            if s == "SERVE_READY":
+                return True
+            if s == "CONNECT_FAIL":
+                self.error_occurred.emit("连接控制器失败(CONNECT_FAIL)")
+                return False
+
+    def _stop_proc(self) -> None:
+        p = self._proc
+        self._proc = None
+        if p is None:
+            return
+        try:
+            if p.poll() is None:
+                p.stdin.write("quit\n"); p.stdin.flush()   # 触发退出前 stopall
+                p.wait(timeout=3)
+        except Exception:
+            try:
+                p.stdin.close()
+            except Exception:
+                pass
+        try:
+            if p.poll() is None:
+                p.terminate()
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------ #
+    #  状态解析（可直接测试）
+    # ------------------------------------------------------------------ #
+    def read_all_sync(self) -> Optional[dict]:
+        out = self._send("readall")
+        if "JOINT" not in out:
+            return None
+        st = {"joints": [0.0] * 4, "pose": [0.0] * 6, "enable": 0, "mode": "?",
+              "warn": 0, "control": 0, "speed": 0.0, "mechlock": 0,
+              "di_on": 0, "di_list": [], "do_on": 0, "do_list": []}
+        for line in out.splitlines():
+            t = line.split()
+            if not t:
+                continue
+            try:
+                k = t[0]
+                if k == "JOINT": st["joints"] = [float(x) for x in t[1:5]]
+                elif k == "POSE": st["pose"] = [float(x) for x in t[1:7]]
+                elif k == "ENABLE": st["enable"] = int(t[1])
+                elif k == "MODE": st["mode"] = t[1]
+                elif k == "WARN": st["warn"] = int(t[1])
+                elif k == "CONTROL": st["control"] = int(t[1])
+                elif k == "SPEED": st["speed"] = float(t[1])
+                elif k == "MECHLOCK": st["mechlock"] = int(t[1])
+                elif k == "DI_ON":
+                    st["di_on"] = int(t[1])
+                    st["di_list"] = [int(x) for x in t[2].split(",") if x] if len(t) > 2 else []
+                elif k == "DO_ON":
+                    st["do_on"] = int(t[1])
+                    st["do_list"] = [int(x) for x in t[2].split(",") if x] if len(t) > 2 else []
+            except (ValueError, IndexError):
+                continue
+        return st
+
+    @staticmethod
+    def _ok(out: str) -> bool:
+        # 空输出必须判失败：_send() 在未连接/进程已死时返回 ""，而空串不含任何
+        # 失败关键词 → 原来 _ok("") 为 True，掉线时 enable/move1/stopall 等全部被
+        # 当成"执行成功"，流程带着错误前提继续往下走且无人察觉。
+        if not out.strip():
+            return False
+        return not any(b in out for b in ("CONNECT_FAIL", "TIMEOUT", "未找到", "ABORT", "CMD_ERR", "=False"))
+
+    # ------------------------------------------------------------------ #
+    #  Qt 层：连接 / 轮询 / 异步命令
+    # ------------------------------------------------------------------ #
+    @property
+    def config(self) -> ScaraConfig:
+        return self._cfg
+
+    def is_connected(self) -> bool:
+        return self._connected
+
+    def preset_names(self) -> List[str]:
+        return list(self._presets.keys())
+
+    def connect(self) -> bool:
+        if self._connected:
+            return True
+        if not self._start_proc():
+            self._connected = False
+            self.connection_changed.emit(False)
+            return False
+        st = self.read_all_sync()
+        if st is None:
+            self._stop_proc()
+            self._connected = False
+            self.error_occurred.emit("连接后读取状态失败")
+            self.connection_changed.emit(False)
+            return False
+        self._connected = True
+        self._last_status = st
+        self.info_occurred.emit(f"已连接控制器 {self._cfg.controller_ip}:{self._cfg.controller_port}")
+        self.connection_changed.emit(True)
+        self.status_updated.emit(st)
+        self.presets_changed.emit(self.preset_names())
+        self._start_polling()
+        return True
+
+    def connect_async(self) -> None:
+        """把阻塞的 connect()（启动 exe + 读状态握手）放线程池执行，避免冻结 GUI。
+        结果经 connection_changed / error_occurred 信号回到 UI 线程。同步 connect()
+        仍保留（供脱离 Qt 的直测）。"""
+        if self._connected or self._connecting:
+            return
+        self._connecting = True
+        self._pool.start(_ConnectCmd(self))
+
+    def disconnect(self) -> None:
+        self._stop_polling()
+        self._stop_proc()
+        self._connected = False
+        self.info_occurred.emit("已断开")
+        self.connection_changed.emit(False)
+
+    def _start_polling(self) -> None:
+        if self._poller is None:
+            self._poller = _PollThread(self, self._cfg.poll_interval_ms)
+            self._poller.status_ready.connect(self._on_poll)
+            self._poller.start()
+
+    def _stop_polling(self) -> None:
+        if self._poller is not None:
+            self._poller.stop(); self._poller.wait(2000); self._poller = None
+
+    def _on_poll(self, st: dict) -> None:
+        self._last_status = st
+        self.status_updated.emit(st)
+
+    def _submit(self, name: str, line: str, need_motion: bool = False) -> None:
+        if need_motion and not self._motion_guard():
+            return
+        self._pool.start(_Command(self, name, line))
+
+    # —— 供 UI 的异步命令 —— #
+    def cmd_enable(self):        self._submit("使能", "enable")
+    def cmd_disable(self):       self._submit("去使能", "disable")
+    def cmd_clear_alarm(self):   self._submit("清报警", "clearalarm")
+    def cmd_set_mode(self, m):   self._submit(f"模式 {m}", f"setmode {MODE_CODE.get(m,1)}")
+    def cmd_set_speed(self, pct):
+        v = self._cfg.clamp_speed(pct)  # 钳到 [min,max]，防非UI/未来调用越界下发（clamp_speed 原为死代码）
+        self._submit(f"速度 {v}%", f"setspeed {v}")
+    def cmd_set_do(self, i, on): self._submit(f"DO[{i}]={'1' if on else '0'}", f"setdo {i} {1 if on else 0}")
+    def cmd_home(self):          self._submit("回零", "home", need_motion=True)
+
+    def cmd_move_joint(self, joint: int, delta: float):
+        self._submit(f"J{joint} {delta:+g}", f"move1 {joint} {delta:g} {self._cfg.move_hold_s}", need_motion=True)
+
+    def cmd_cart_step(self, axis: str, delta: float):
+        self._submit(f"{axis} {delta:+g}mm", f"cartstep {CART_AXIS[axis.upper()]} {delta:g}", need_motion=True)
+
+    # —— 连续点动（press-hold + 续命）—— #
+    def jog_start(self, axis, direction: str, world: bool = False):
+        """axis: 1-4 或 'X'/'Y'/'Z'；direction: '+'/'-'。按住期间定时续命保持连续运动。"""
+        if not self._motion_guard():
+            return
+        code = CART_AXIS[axis.upper()] if isinstance(axis, str) else JOINT_AXIS[int(axis)]
+        d = DIR_CODE.get(direction, 1)
+        w = world or isinstance(axis, str)
+        self._jog_active = (code, d, w)
+        self._submit(f"连续点动 {axis}{direction}", f"jogstart {code} {d}{' world' if w else ''}")
+        self._jog_timer.start()
+
+    def _jog_heartbeat(self):
+        """定时重发 jog(轻量 jogkeep)刷新控制器看门狗，保持连续运动。"""
+        if self._jog_active is None:
+            self._jog_timer.stop(); return
+        code, d, _ = self._jog_active
+        self._pool.start(_QuietCmd(self, f"jogkeep {code} {d}"))
+
+    def jog_stop(self, axis):
+        self._jog_timer.stop()
+        self._jog_active = None
+        code = CART_AXIS[axis.upper()] if isinstance(axis, str) else JOINT_AXIS[int(axis)]
+        self._submit("jog停", f"jogstop {code}")
+
+    def emergency_stop(self):
+        self.warning_occurred.emit("急停触发：停止所有运动并去使能")
+        self._submit("急停", "stopall")
+
+    # —— 预设点 —— #
+    def save_preset(self, name: str) -> None:
+        st = self._last_status or self.read_all_sync()
+        if not st:
+            self.warning_occurred.emit("无法保存预设：未读到位置")
+            return
+        self._presets[name] = list(st["joints"])
+        self._save_presets()
+        self.info_occurred.emit(f"已保存预设点「{name}」: {['%.2f'%x for x in st['joints']]}")
+        self.presets_changed.emit(self.preset_names())
+
+    def delete_preset(self, name: str) -> None:
+        if name in self._presets:
+            del self._presets[name]; self._save_presets()
+            self.presets_changed.emit(self.preset_names())
+
+    def cmd_goto_preset(self, name: str):
+        """移动到预设点：逐轴相对移动到目标关节值（move1 已验证可靠）。"""
+        if name not in self._presets or not self._motion_guard():
+            return
+        target = self._presets[name]
+
+        def _go() -> Tuple[bool, str]:
+            ok_all = True
+            for j in range(4):
+                st = self.read_all_sync()
+                if st is None:
+                    # serve 进程死/读超时时 read_all_sync 返回 None；此处若直接下标会
+                    # TypeError。中止并告警，避免只走了一半关节留在半途（与文件其它读点一致判空）。
+                    self.warning_occurred.emit(f"前往「{name}」中止：读取当前位置失败")
+                    return False, name
+                cur = st["joints"][j]
+                delta = target[j] - cur
+                if abs(delta) < 0.05:
+                    continue
+                out = self._send(f"move1 {j+1} {delta:g} 1")
+                ok_all = ok_all and self._ok(out)
+            return ok_all, name
+        self._pool.start(_Command(self, f"前往「{name}」", None, fn=_go))
+
+    def _motion_guard(self) -> bool:
+        if not self._connected:
+            self.warning_occurred.emit("未连接，无法运动"); return False
+        if self._cfg.require_enable_before_motion and int(self._last_status.get("enable", 0)) != 1:
+            self.warning_occurred.emit("未使能，请先点击“使能”"); return False
+        if int(self._last_status.get("warn", 0)) != 0:
+            self.warning_occurred.emit("存在报警，请先清报警"); return False
+        return True
+
+    # —— 预设点持久化 —— #
+    def _load_presets(self) -> None:
+        try:
+            p = Path(PRESET_FILE)
+            if p.exists():
+                self._presets = json.loads(p.read_text("utf-8"))
+        except Exception:
+            self._presets = {}
+
+    def _save_presets(self) -> None:
+        try:
+            Path(PRESET_FILE).write_text(json.dumps(self._presets, ensure_ascii=False, indent=2), "utf-8")
+        except Exception as exc:
+            logger.warning("保存预设失败: %s", exc)
+
+    def cleanup(self) -> None:
+        self._stop_polling()
+        self._stop_proc()
+        self._connected = False
+        try:
+            self._relay.cleanup()
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------ #
+    #  继电器控制（电磁阀 / 泵）
+    # ------------------------------------------------------------------ #
+    def relay_connect(self) -> bool:
+        """连接 SCARA 工位继电器（电磁阀/泵）。"""
+        ok = self._relay.connect()
+        self._relay_connected = ok
+        if ok:
+            self.info_occurred.emit("继电器已连接 (192.168.0.80:1024)")
+        else:
+            self.error_occurred.emit("继电器连接失败 (192.168.0.80:1024)")
+        return ok
+
+    def relay_disconnect(self) -> None:
+        self._relay.cleanup()
+        self._relay_connected = False
+        self.info_occurred.emit("继电器已断开")
+
+    def relay_is_connected(self) -> bool:
+        return self._relay.is_connected()
+
+    def relay_read_states(self) -> tuple[bool, bool]:
+        return self._relay.read_states()
+
+    def relay_set_valve(self, on: bool) -> None:
+        if not self._relay_connected:
+            self.warning_occurred.emit("继电器未连接，忽略电磁阀操作"); return
+        self._relay.set_valve(bool(on))
+
+    def relay_set_pump(self, on: bool) -> None:
+        if not self._relay_connected:
+            self.warning_occurred.emit("继电器未连接，忽略泵操作"); return
+        self._relay.set_pump(bool(on))
+
+    def relay_all_off(self) -> None:
+        if not self._relay_connected:
+            return  # 未连接直接跳过；底层 all_off 会 RuntimeError('继电器未连接')
+        self._relay.all_off()
+
+
+class _Command(QRunnable):
+    """线程池执行一条 serve 命令或自定义函数，完成后发信号并刷新状态。"""
+
+    def __init__(self, ctrl: ScaraController, name: str, line: Optional[str], fn=None):
+        super().__init__()
+        self._ctrl = ctrl; self._name = name; self._line = line; self._fn = fn
+
+    def run(self) -> None:
+        try:
+            if self._fn is not None:
+                ok, _ = self._fn()
+            else:
+                out = self._ctrl._send(self._line)
+                ok = ScaraController._ok(out)
+        except Exception as exc:  # pragma: no cover
+            ok = False
+        self._ctrl.command_finished.emit(self._name, bool(ok), "")
+        st = self._ctrl.read_all_sync()
+        if st is not None:
+            self._ctrl.status_updated.emit(st)
+
+
+class _ConnectCmd(QRunnable):
+    """后台线程执行阻塞的 connect() 握手，避免冻结 GUI 事件循环。"""
+
+    def __init__(self, ctrl: ScaraController):
+        super().__init__()
+        self._ctrl = ctrl
+
+    def run(self) -> None:
+        try:
+            self._ctrl.connect()
+        except Exception as exc:  # pragma: no cover - 兜底：异常也要复位标志并告知 UI
+            self._ctrl.error_occurred.emit(f"连接异常: {exc}")
+            self._ctrl.connection_changed.emit(False)
+        finally:
+            self._ctrl._connecting = False
+
+
+class _QuietCmd(QRunnable):
+    """静默执行一条命令(jog 续命)，不发信号、不刷新，避免日志刷屏。"""
+
+    def __init__(self, ctrl: ScaraController, line: str):
+        super().__init__()
+        self._ctrl = ctrl; self._line = line
+
+    def run(self) -> None:
+        try:
+            self._ctrl._send(self._line)
+        except Exception:
+            pass
+
+
+class _PollThread(QThread):
+    status_ready = pyqtSignal(dict)
+
+    def __init__(self, ctrl: ScaraController, interval_ms: int):
+        super().__init__()
+        self._ctrl = ctrl
+        self._interval_ms = max(200, int(interval_ms))
+        self._running = True
+
+    def run(self) -> None:
+        while self._running:
+            st = self._ctrl.read_all_sync()
+            if st is not None:
+                self.status_ready.emit(st)
+            slept = 0
+            while self._running and slept < self._interval_ms:
+                self.msleep(50); slept += 50
+
+    def stop(self) -> None:
+        self._running = False

@@ -1,0 +1,6 @@
+.vscode/
+logs/
+_smoke/
+__pycache__/
+*.pyc
+.env
