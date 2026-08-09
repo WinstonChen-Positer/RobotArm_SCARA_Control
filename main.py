@@ -4,8 +4,7 @@
   - 「机械臂控制」：DUCO GCR3-618 六轴协作臂（经本机 armweb 代理连真机）
   - 「SCARA 机械臂」：新松 SA4A-4/0.40（经 snrobot.exe 命令行桥连控制器）
 
-启动时随 GUI 拉起本地后端服务（继电器守护 19100 → armweb 8080），
-退出时按反序停掉。加 --no-services 可跳过服务自启（例如服务已由人工启动）。
+启动时随 GUI 拉起 armweb（8080），退出时停掉。加 --no-services 可跳过服务自启（例如服务已由人工启动）。
 
 用法：
     python main.py [--no-services]
@@ -24,8 +23,7 @@ from PyQt6.QtWidgets import QApplication, QMainWindow, QTabWidget
 
 
 def main() -> int:
-    # 继电器守护 + armweb 是泵/阀的下发后端，随 GUI 一起起，
-    # 免得每次还要手工连一遍。--no-services 可跳过。
+    # armweb 是 DUCO 真机代理，随 GUI 一起起。--no-services 可跳过。
     start_services = "--no-services" not in sys.argv
     if not start_services:
         sys.argv.remove("--no-services")
@@ -54,8 +52,7 @@ def main() -> int:
         }
     """)
 
-    # 拉起本地后端服务（继电器守护 19100 → armweb 8080，有依赖顺序）。
-    # 放在建主窗口之前，这样页面构造时服务已经可用。
+    # 拉起 armweb（8080）。放在建主窗口之前，页面构造时服务已可用。
     services = None
     if start_services:
         from utils.local_services import LocalServices

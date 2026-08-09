@@ -1,7 +1,7 @@
 """SCARA 送检流水线 · 硬件依赖抽象层。
 
 三个 Protocol 把「运动 / 取帧 / 吸放」从具体硬件解耦：
-- 生产：薄适配器包已构造好的 ScaraController / ScaraCameraThread / PumpClient；
+- 生产：薄适配器包已构造好的 ScaraController / ScaraCameraThread；
 - 测试：手写 Fake，无需真机、Qt、串口或相机。
 
 设计要点（详见 docs/scara_pipeline_architecture.md）：
@@ -668,24 +668,3 @@ class RpcMicroscope:
                 err = st.get("error")
                 return (False, f"scan_error:{err}") if err else (True, "")
         return False, f"scan_timeout:{timeout_s}s"
-
-
-class PumpClientSuction:
-    """把 pump_client.PumpClient 适配成 SuctionBackend（走 armweb /api/relay 的具名设备）。
-
-    on/off 用 scara_suction_on/off（已封装正确吸放顺序：吸=关阀再开泵，放=关泵再开阀）；
-    映射 scara_pump/scara_vent 的板/通道由 robot_arm.yaml 决定（走设备名，不写死通道）。
-    """
-
-    def __init__(self, pump_client: Any, sleep_fn: Callable[[float], None] = time.sleep):
-        self._p = pump_client
-        self._sleep = sleep_fn
-
-    def on(self) -> None:
-        self._p.scara_suction_on()
-
-    def off(self) -> None:
-        self._p.scara_suction_off()
-
-    def settle_wait(self, seconds: float) -> None:
-        self._sleep(max(0.0, float(seconds)))

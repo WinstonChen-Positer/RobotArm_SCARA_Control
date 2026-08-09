@@ -2,16 +2,7 @@
 
 调用链::
 
-    GUI -> armweb (8080) -> PumpController -> 继电器守护 (19100) -> 继电器板
-
-泵、阀、信号灯的命令要落到硬件，这两跳都必须在线，而界面上并没有
-对应的"连接"按钮 —— 所以在应用启动时按依赖顺序（先守护进程、后
-armweb）把它们拉起来，退出时按反序停掉。
-
-MBAP 继电器板（``b80`` = 2 泵 + 红/黄灯，``b81`` = 2 泄压阀 + 2 泵）
-走标准 Modbus TCP，守护进程不需要管理员权限；只有 ``b50``（绿灯 +
-大泵）要冒充云服务器拨号，依赖 npcap + 管理员。没有 npcap 时守护进程
-优雅降级，其余板子照常工作。
+    GUI -> armweb (8080) -> DUCO 真机 (thrift)
 
 已在运行的服务（手工启动或上次遗留）会被识别并接管：既不重复启动，
 退出时也不去停它们。
@@ -34,9 +25,6 @@ logger = get_logger("services")
 
 HOST = "127.0.0.1"
 ARMWEB_PORT = 8080
-RELAY_DAEMON_PORT = 19100
-# 继电器守护进程拨 b50 云传输时用的 Windows 网卡关键字。
-DEFAULT_RELAY_NIC = "I219-LM"
 
 
 def _repo_root() -> Path:
@@ -166,19 +154,6 @@ class LocalService:
         return self._log_path
 
 
-def _relay_daemon_service() -> LocalService:
-    root = _repo_root()
-    nic = os.environ.get("RELAY_NIC", "").strip() or DEFAULT_RELAY_NIC
-    port = _env_int("RELAY_DAEMON_PORT", RELAY_DAEMON_PORT)
-    return LocalService(
-        name="relay-daemon",
-        port=port,
-        argv=[str(root / "webconsole" / "relay_daemon" / "relay_pump_daemon.py"),
-              "--http-port", str(port), "--nic", nic],
-        log_stem="relay_daemon",
-    )
-
-
 def _armweb_service() -> LocalService:
     root = _repo_root()
     port = _env_int("ARMWEB_PORT", ARMWEB_PORT)
@@ -193,8 +168,6 @@ def _armweb_service() -> LocalService:
 def connect_arm(port: Optional[int] = None, mode: str = "thrift") -> bool:
     """把 armweb 从默认的 sim 模式切到真机。
 
-    armweb 启动时处于 ``sim``；未连接真机前，``arm_pump`` 和 ``big_pump``
-    会被它的 ``_require_ready()`` 拦截，界面上的泵开关点了也没反应。
     这里只做连接 —— 不使能（伺服上电）。使能会让机械臂带电，
     始终是操作者手动确认的动作。
     """
@@ -221,12 +194,10 @@ def connect_arm(port: Optional[int] = None, mode: str = "thrift") -> bool:
 
 
 class LocalServices:
-    """先起继电器守护、再起 armweb；停止时按反序。"""
+    """启动 armweb；停止时关闭由本程序拉起的实例。"""
 
     def __init__(self, connect_arm_on_start: bool = True) -> None:
-        # 顺序有讲究：armweb 的 PumpController 要连守护进程，
-        # 守护进程先监听，否则第一批继电器写入会超时。
-        self._services: List[LocalService] = [_relay_daemon_service(), _armweb_service()]
+        self._services: List[LocalService] = [_armweb_service()]
         self._connect_arm = bool(connect_arm_on_start)
 
     def start_all(self) -> bool:
@@ -235,7 +206,7 @@ class LocalServices:
             if not svc.start():
                 ok = False
                 logger.error(
-                    "%s 未就绪 —— 继电器/泵/阀/信号灯可能无法下发（日志: %s）",
+                    "%s 未就绪（日志: %s）",
                     svc.name, svc.log_path,
                 )
         if ok and self._connect_arm and not connect_arm():

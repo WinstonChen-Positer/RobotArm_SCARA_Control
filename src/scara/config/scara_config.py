@@ -20,7 +20,7 @@ except ModuleNotFoundError:  # 3.10 回退到 tomli
 
 # 默认 snrobot.exe 所在目录（含 RobotCommunication SDK DLL + 许可证 SiaSunRobot.lic，exe 必须在此运行）
 # 本机 SNRobotLab 装在 C 盘（无 D 盘）；snrobot.exe 桥已复制到此目录与 SDK/许可证同放。
-DEFAULT_EXE_DIR = r"C:\software\SNRobotLab"
+DEFAULT_EXE_DIR = r"D:\SNRobotLab"
 DEFAULT_EXE_NAME = "snrobot.exe"
 
 

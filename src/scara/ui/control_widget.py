@@ -270,30 +270,17 @@ class ScaraControlWidget(QWidget):
         row.addWidget(self._preset_combo, 1); row.addWidget(self._btn_goto); row.addWidget(self._btn_del_preset)
         g.addLayout(row); v.addWidget(f)
 
-        f, g = _card("IO 输出")
-        row = QHBoxLayout(); row.addWidget(QLabel("DO 通道"))
+        f, g = _card("泵 / DO（scara_do）")
+        row = QHBoxLayout(); row.addWidget(QLabel("UO 通道"))
         self._do_idx = QSpinBox(); self._do_idx.setRange(1, 4096); self._do_idx.setValue(1)
-        b1 = _btn("置 1", "success"); b0 = _btn("置 0")
+        b1 = _btn("开泵", "success"); b0 = _btn("停泵")
         b1.clicked.connect(lambda: self._ctrl.cmd_set_do(self._do_idx.value(), True))
         b0.clicked.connect(lambda: self._ctrl.cmd_set_do(self._do_idx.value(), False))
         row.addWidget(self._do_idx); row.addWidget(b1); row.addWidget(b0); row.addStretch(1)
-        g.addLayout(row); v.addWidget(f)
-
-        # ---- 新增：SCARA 工位电磁阀 / 泵继电器控制 ----
-        f, g = _card("电磁阀 / 泵")
-        row = QHBoxLayout()
-        self._btn_relay_conn = _btn("连接继电器", "primary")
-        self._relay_chip = QLabel("● 未连接"); self._relay_chip.setObjectName("chip")
-        self._relay_chip.setStyleSheet(f"color:{T.TEXT_MUTED}; background:#EAF0F7;")
-        row.addWidget(self._btn_relay_conn); row.addStretch(1); row.addWidget(self._relay_chip)
         g.addLayout(row)
-        row = QHBoxLayout()
-        self._btn_valve = _btn("电磁阀：关", "success"); self._btn_valve.setCheckable(True)
-        self._btn_pump = _btn("泵：关", "success"); self._btn_pump.setCheckable(True)
-        row.addWidget(self._btn_valve); row.addWidget(self._btn_pump); row.addStretch(1)
-        g.addLayout(row)
-        self._btn_relay_off = _btn("全部关闭")
-        g.addWidget(self._btn_relay_off)
+        tip = QLabel("写 DO 会另连控制器；机械臂已连接时可能失败，测泵请先断开机械臂。")
+        tip.setObjectName("muted"); tip.setWordWrap(True)
+        g.addWidget(tip)
         v.addWidget(f)
 
         v.addStretch(1)
@@ -398,11 +385,6 @@ class ScaraControlWidget(QWidget):
         self._btn_del_preset.clicked.connect(lambda: self._ctrl.delete_preset(self._preset_combo.currentText()))
         self._btn_cam.clicked.connect(self._toggle_camera)
         self._btn_snap.clicked.connect(self._snapshot)
-        # 继电器按钮绑定
-        self._btn_relay_conn.clicked.connect(self._on_relay_connect)
-        self._btn_valve.toggled.connect(self._on_valve_toggle)
-        self._btn_pump.toggled.connect(self._on_pump_toggle)
-        self._btn_relay_off.clicked.connect(self._on_relay_all_off)
         self._ctrl.connection_changed.connect(self._on_conn)
         self._ctrl.status_updated.connect(self._on_status)
         self._ctrl.presets_changed.connect(self._on_presets)
@@ -531,57 +513,6 @@ class ScaraControlWidget(QWidget):
         lbl.setText(text)
         color = T.PRIMARY_COLOR if info else (T.SUCCESS_COLOR if good else T.ERROR_COLOR)
         lbl.setStyleSheet(f"font-weight:700; font-size:12px; color:{color};")
-
-    def _on_relay_connect(self) -> None:
-        if self._ctrl.relay_is_connected():
-            self._ctrl.relay_disconnect()
-        else:
-            ok = self._ctrl.relay_connect()
-            if ok:
-                valve, pump = self._ctrl.relay_read_states()
-                self._btn_valve.setChecked(valve)
-                self._btn_pump.setChecked(pump)
-        self._update_relay_ui()
-
-    def _on_valve_toggle(self, checked: bool) -> None:
-        if not self._ctrl.relay_is_connected():
-            return
-        self._ctrl.relay_set_valve(checked)
-        self._update_relay_button(self._btn_valve, checked, "电磁阀")
-
-    def _on_pump_toggle(self, checked: bool) -> None:
-        if not self._ctrl.relay_is_connected():
-            return
-        self._ctrl.relay_set_pump(checked)
-        self._update_relay_button(self._btn_pump, checked, "泵")
-
-    def _on_relay_all_off(self) -> None:
-        if not self._ctrl.relay_is_connected():
-            self._append("警告", "继电器未连接", T.WARNING_COLOR)
-            return
-        self._ctrl.relay_all_off()
-        self._btn_valve.setChecked(False)
-        self._btn_pump.setChecked(False)
-        self._update_relay_button(self._btn_valve, False, "电磁阀")
-        self._update_relay_button(self._btn_pump, False, "泵")
-
-    def _update_relay_button(self, btn: QPushButton, checked: bool, name: str) -> None:
-        btn.setText(f"{name}：{'开' if checked else '关'}")
-        self._set_css(btn, "success" if checked else "")
-
-    def _update_relay_ui(self) -> None:
-        ok = self._ctrl.relay_is_connected()
-        self._relay_chip.setText("● 已连接" if ok else "● 未连接")
-        self._relay_chip.setStyleSheet(
-            f"color:{T.SUCCESS_COLOR}; background:#E7F6EF;" if ok else f"color:{T.TEXT_MUTED}; background:#EAF0F7;"
-        )
-        self._btn_relay_conn.setText("断开继电器" if ok else "连接继电器")
-        self._btn_valve.setEnabled(ok)
-        self._btn_pump.setEnabled(ok)
-        self._btn_relay_off.setEnabled(ok)
-        if not ok:
-            self._update_relay_button(self._btn_valve, False, "电磁阀")
-            self._update_relay_button(self._btn_pump, False, "泵")
 
     def _append(self, tag: str, msg: str, color: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")

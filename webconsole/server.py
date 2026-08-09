@@ -23,10 +23,9 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(HERE))  # 让 pump_controller / tas_io（同目录）可 import
+sys.path.insert(0, str(HERE))
 
 from devices.robot_arm import create_backend, load_config, RobotArmStatus  # noqa: E402
-from pump_controller import PumpController  # noqa: E402  真空泵继电器（TAS-IO DO1/DO2）
 from devices.robot_arm import sequences as seqmod  # noqa: E402
 from devices.robot_arm.duco_rpc import ST_ROBOT, ST_SAFE, ST_MODE, ST_PROG  # noqa: E402
 
@@ -174,33 +173,6 @@ class ArmService:
         # seq 每次 goto_pose 递增；error="" 表成功、非空为失败原因。
         self._goto_pose_seq = 0
         self._goto_pose_error = ""
-        # 真空泵/阀继电器（TAS-IO-240R-S2）。冒充云接管方案：经常驻守护进程
-        # relay_pump_daemon.py 控泵/阀（HTTP）。配置读 relay 节；若缺失则用默认映射。
-        # 2026-07-06 起支持双板：配置优先读 relay.devices 具名映射。
-        _relay = (load_config() or {}).get("relay", {})
-        self.pump = PumpController(
-            daemon_url=_relay.get("daemon_url", "http://127.0.0.1:19100"),
-            timeout=float(_relay.get("timeout_s", 3.0)),
-            retries=int(_relay.get("retries", 2)),
-            relay_devices=self._load_relay_devices(_relay),
-            arm_pump_do=int(_relay.get("arm_pump_do", 1)),
-            hotplate_pump_do=int(_relay.get("hotplate_pump_do", 2)),
-        )
-
-    @staticmethod
-    def _load_relay_devices(relay_cfg: dict) -> dict:
-        """从 yaml relay 节读取具名设备映射；无 devices 时降级到旧 DO 号。"""
-        devices = relay_cfg.get("devices")
-        if devices and isinstance(devices, dict):
-            return {
-                name: {"board": str(cfg.get("board", "b80")), "ch": int(cfg.get("ch", 0))}
-                for name, cfg in devices.items()
-            }
-        # 旧配置兼容（board 默认 b80=新4路板）
-        return {
-            "arm_pump": {"board": "b80", "ch": int(relay_cfg.get("arm_pump_do", 1))},
-            "hotplate_pump": {"board": "b80", "ch": int(relay_cfg.get("hotplate_pump_do", 3))},
-        }
 
     # ── 状态快照 ────────────────────────────────────────────
     def status(self) -> dict:
@@ -488,57 +460,20 @@ class ArmService:
             return False, str(e)
 
     def gripper(self, port, value):
-        # 兼容旧端点名 /api/gripper；语义 = 机械臂吸盘泵（继电器 DO1）。
-        # port 参数保留但忽略（机械臂末端自身 DO 从未接线，泵改走外部继电器 DO1）。
-        return self.set_arm_pump(bool(value))
+        # 旧语义：机械臂吸盘泵（塔石继电器）。已移除，请用 DH 夹爪端点 /api/gripper/init 等。
+        return False, "塔石继电器泵控制已移除（请用夹爪 API 或 SCARA scara_do）"
 
     def set_arm_pump(self, on: bool):
-        # 机械臂泵吸在末端：必须机械臂已就绪（连接+使能）才允许动作，
-        # 避免报警/未使能态误开泵导致吸着的硅片脱手。
-        if not self._require_ready():
-            return False, self.message
-        try:
-            self.pump.set_arm_pump(bool(on))
-            self.message = "机械臂吸盘泵 = %s" % bool(on)
-            return True, ""
-        except Exception as e:
-            self.message = "机械臂吸盘泵失败: %s" % e
-            return False, str(e)
+        return False, "塔石继电器泵控制已移除"
 
     def set_hotplate_pump(self, on: bool):
-        # 热台泵独立于机械臂：机械臂断连/报警时操作员仍应能单独开关热台泵，故不做就绪检查。
-        try:
-            self.pump.set_hotplate_pump(bool(on))
-            self.message = "热台泵 = %s" % bool(on)
-            return True, ""
-        except Exception as e:
-            self.message = "热台泵失败: %s" % e
-            return False, str(e)
+        return False, "塔石继电器泵控制已移除"
 
     def set_relay_device(self, name: str, on: bool):
-        """通用继电器设备开关。泵类（arm_pump/big_pump）要求机械臂已就绪；阀类独立。"""
-        dev = self.pump._devices.get(name)
-        if not dev:
-            return False, "未知继电器设备: %s" % name
-        # 泵类开启要求机械臂就绪；但**关断永远放行**——急停/退出时要能无条件切断
-        # 真空，机械臂未连接/未使能反而更该断电。原来关断也被门禁拒掉，导致全局急停
-        # 在机械臂离线时切不断 arm_pump/big_pump。
-        requires_ready = bool(on) and name in ("arm_pump", "big_pump")
-        if requires_ready and not self._require_ready():
-            return False, self.message
-        try:
-            self.pump._set(dev["ch"], bool(on), dev["board"])
-            self.message = "%s = %s" % (name, bool(on))
-            return True, ""
-        except Exception as e:
-            self.message = "%s 失败: %s" % (name, e)
-            return False, str(e)
+        return False, "塔石继电器控制已移除"
 
     def pump_status(self):
-        try:
-            return True, self.pump.read_pumps()
-        except Exception as e:
-            return False, {"error": str(e)}
+        return False, {"error": "塔石继电器控制已移除"}
 
     # ── 夹爪（大寰 PGEA-50-26-O，工具端 485 透传）─────────────────
     #    路由 /api/gripper/init|grip|release + 状态并入 /api/status。后端方法

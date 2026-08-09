@@ -67,39 +67,3 @@ gripper:
   active_high: true   # 高电平=吸
   settle_on_ms: 400   # 吸: 建立负压等待
   settle_off_ms: 300  # 放: 泄压等待
-
-# 真空泵/阀/信号灯继电器（3 块板）。接管方案：继电器保持出厂网络模式不改，由常驻守护进程
-# relay_pump_daemon.py 接住它、用 DO 线圈控设备，armweb 经 HTTP 调它。
-# 2026-07-24 用户重排 + 泵测法逐板确认的三继电器映射（板键=控制路径标识）：
-#   b80     = 192.168.0.80:1024 塔石网络板（标准 Modbus TCP/MBAP，实测口=1024）—— 继电器2：2 泵 + 红/黄灯
-#   b50     = 192.168.1.50      旧连云板（板拨云，daemon 冒充云 accept）—— 继电器3：绿灯 + 大泵
-#   b81     = 192.168.0.81:1024 塔石网络板（与 b80 同型同固件）—— 继电器4：2 泄压阀 + 2 泵
-# 2026-07-26：四路阀/泵曾长期失控，根因是 b81 出厂默认没配过 —— IP 停在塔石默认
-#   192.168.0.80 与 b80 撞车（两块板对同一 IP 全抢答，按网段扫描永远发现不了），
-#   且监听口是 10123 而非 1024。已改为 192.168.0.81:1024 并对齐 b80 串口参数。
-#   duco_io（DUCO 机柜自带 IO）实际没接这些阀，已从映射中移除。
-# 部署：先起 relay_pump_daemon.py（b50 连云需 npcap+管理员，tools/relay_restart_multi.ps1 提权），再起 armweb。
-relay:
-  daemon_url: "http://127.0.0.1:19100"  # 守护进程 HTTP 地址
-  timeout_s: 3.0
-  # 具名继电器设备 → 板/通道映射（ch 为 1 基）。
-  devices:
-    # ── 继电器4：b81 塔石网络板（192.168.0.81:1024）4 路阀/泵 ──
-    # 这四路原先错挂在 duco_io（DUCO 机柜自带 IO）上，实际走的是独立的塔石板，
-    # 和控灯的 b80 同型同固件。键名沿用旧名以免牵动所有调用方，实际设备见注释。
-    vent_valve:      {board: "b81", ch: 1}       # DUCO 机械臂泄压阀
-    scara_vent:      {board: "b81", ch: 2}       # SCARA 机械臂泄压阀
-    peel_valve:      {board: "b81", ch: 3}       # 胶带玻璃台泵（是泵，不是阀）
-    hotplate_valve:  {board: "b81", ch: 4}       # 热台泵（是泵，不是阀）
-    # ── 继电器2：b80 塔石网络板（192.168.0.80:1024）2 泵 + 红/黄灯 ──
-    arm_pump:        {board: "b80", ch: 1}       # 泵1-duco（机械臂末端吸盘泵）
-    scara_pump:      {board: "b80", ch: 2}       # 泵2-scara 吸盘泵
-    alarm_red:       {board: "b80", ch: 3}       # 红灯 + 蜂鸣器（软件默认不主动测）
-    alarm_yellow:    {board: "b80", ch: 4}       # 黄灯
-    # ── 继电器3：b50 旧连云板（192.168.1.50）绿灯 + 大泵 ──
-    alarm_green:     {board: "b50", ch: 1}       # 绿灯
-    big_pump:        {board: "b50", ch: 2}       # 大泵 / 共用真空源
-  # 兼容旧字段（未读取到 devices 时的降级；当前 devices 已提供，正常不触发）：
-  arm_pump_do: 1        # 已弃用
-  hotplate_pump_do: 3   # 已弃用
-  valve_do: 2           # 已弃用

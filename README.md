@@ -2,8 +2,8 @@
 
 从多设备控制系统中抽取的独立小程序，只含两个设备控制页：
 
-- **机械臂控制**：DUCO GCR3-618 六轴协作臂（含 DH 夹爪、吸盘泵/阀）
-- **SCARA 机械臂**：新松 SA4A-4/0.40（含电磁阀/泵继电器、末端相机）
+- **机械臂控制**：DUCO GCR3-618 六轴协作臂（含 DH 夹爪）
+- **SCARA 机械臂**：新松 SA4A-4/0.40（泵/阀走控制器 UO + scara_do.exe、末端相机）
 
 ## 运行环境
 
@@ -16,10 +16,7 @@
 python main.py
 ```
 
-启动后会打开一个两标签页窗口（「机械臂控制」「SCARA 机械臂」），并自动拉起两个本地后端服务：
-
-- 继电器守护进程（127.0.0.1:19100）—— 泵/阀/信号灯的下发后端
-- armweb 机械臂代理（127.0.0.1:8080）—— DUCO 真机控制通道
+启动后会打开一个两标签页窗口（「机械臂控制」「SCARA 机械臂」），并自动拉起 armweb 机械臂代理（127.0.0.1:8080）。
 
 若这两个服务已由人工启动，可加 `--no-services` 跳过自启：
 
@@ -49,7 +46,7 @@ python main.py --no-services
 
 1. 确认桥程序位于 `C:\software\SNRobotLab\snrobot.exe`。该目录内含 RobotCommunication SDK 与许可证 `SiaSunRobot.lic`，**exe 必须与许可证同目录运行**，不能单独拷走。
 2. 在「SCARA 机械臂」页点连接。连接参数（桥路径、控制器地址、超时等）可在程序根目录建 `scara_config.toml` 覆盖，缺省即上述值。
-3. 泵/电磁阀按钮走继电器守护进程（127.0.0.1:19100，随 `main.py` 自启；也可手工启动：`python webconsole/relay_daemon/relay_pump_daemon.py --http-port 19100`）。
+3. 泵开关走 `scara_do.exe`（须与 `RobotSDK.dll`、许可证同目录，默认 `D:\SNRobotLab`）。界面「泵 / DO（scara_do）」卡片可开泵/停泵；也可用 `tools/test_scara_pump_pulse.py` 做脉冲测试。
 
 ## 安全提示
 
@@ -71,9 +68,8 @@ src/
   scara/                SCARA 模块（UI/控制器/标定/视觉/取放序列）
 webconsole/
   server.py             armweb 机械臂代理（HTTP → thrift → 真机）
-  pump_controller.py    继电器守护进程 HTTP 客户端
   index.html            armweb 浏览器控制台页面
-  relay_daemon/         继电器守护进程（Modbus → 塔石 IO 板）
+tools/scara_do/         SCARA 泵/阀 UO 控制小工具（编译为 scara_do.exe）
 ```
 
 说明：

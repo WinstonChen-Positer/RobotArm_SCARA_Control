@@ -20,7 +20,7 @@ from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal, QRunnable, QThrea
 
 from utils import get_logger
 from scara.config.scara_config import ScaraConfig
-from scara.controller.relay_controller import ScaraRelayController
+from scara.controller.do_client import set_uo as do_set_uo
 
 logger = get_logger("scara.controller")
 
@@ -66,9 +66,6 @@ class ScaraController(QObject):
         # serve 进程输出队列 + 常驻读取线程（见 _send：防止黑盒 exe 卡死导致永久挂起）
         self._rx: "queue.Queue[Optional[str]]" = queue.Queue()
         self._rx_thread: Optional[threading.Thread] = None
-        # SCARA 工位电磁阀/泵继电器控制器
-        self._relay = ScaraRelayController()
-        self._relay_connected = False
 
     # ------------------------------------------------------------------ #
     #  serve 进程读写
@@ -322,7 +319,24 @@ class ScaraController(QObject):
     def cmd_set_speed(self, pct):
         v = self._cfg.clamp_speed(pct)  # 钳到 [min,max]，防非UI/未来调用越界下发（clamp_speed 原为死代码）
         self._submit(f"速度 {v}%", f"setspeed {v}")
-    def cmd_set_do(self, i, on): self._submit(f"DO[{i}]={'1' if on else '0'}", f"setdo {i} {1 if on else 0}")
+    def cmd_set_do(self, i, on):
+        """走 scara_do.exe（方案 C）。会另开一条控制器连接，与 snrobot serve 互斥。"""
+        name = f"DO[{i}]={'1' if on else '0'}"
+        ch, val = int(i), bool(on)
+        if self._connected:
+            self.warning_occurred.emit(
+                "机械臂已连接：写 DO 可能因抢连接失败。测泵请先断开机械臂。"
+            )
+
+        def _fn():
+            ok, msg = do_set_uo(ch, val)
+            if not ok:
+                self.error_occurred.emit(msg or "scara_do 失败")
+            else:
+                self.info_occurred.emit(msg or name)
+            return ok, msg
+
+        self._pool.start(_Command(self, name, None, fn=_fn))
     def cmd_home(self):          self._submit("回零", "home", need_motion=True)
 
     def cmd_move_joint(self, joint: int, delta: float):
@@ -428,49 +442,6 @@ class ScaraController(QObject):
         self._stop_polling()
         self._stop_proc()
         self._connected = False
-        try:
-            self._relay.cleanup()
-        except Exception:
-            pass
-
-    # ------------------------------------------------------------------ #
-    #  继电器控制（电磁阀 / 泵）
-    # ------------------------------------------------------------------ #
-    def relay_connect(self) -> bool:
-        """连接 SCARA 工位继电器（电磁阀/泵）。"""
-        ok = self._relay.connect()
-        self._relay_connected = ok
-        if ok:
-            self.info_occurred.emit("继电器已连接 (192.168.0.80:1024)")
-        else:
-            self.error_occurred.emit("继电器连接失败 (192.168.0.80:1024)")
-        return ok
-
-    def relay_disconnect(self) -> None:
-        self._relay.cleanup()
-        self._relay_connected = False
-        self.info_occurred.emit("继电器已断开")
-
-    def relay_is_connected(self) -> bool:
-        return self._relay.is_connected()
-
-    def relay_read_states(self) -> tuple[bool, bool]:
-        return self._relay.read_states()
-
-    def relay_set_valve(self, on: bool) -> None:
-        if not self._relay_connected:
-            self.warning_occurred.emit("继电器未连接，忽略电磁阀操作"); return
-        self._relay.set_valve(bool(on))
-
-    def relay_set_pump(self, on: bool) -> None:
-        if not self._relay_connected:
-            self.warning_occurred.emit("继电器未连接，忽略泵操作"); return
-        self._relay.set_pump(bool(on))
-
-    def relay_all_off(self) -> None:
-        if not self._relay_connected:
-            return  # 未连接直接跳过；底层 all_off 会 RuntimeError('继电器未连接')
-        self._relay.all_off()
 
 
 class _Command(QRunnable):
