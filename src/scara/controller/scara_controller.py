@@ -20,7 +20,7 @@ from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal, QRunnable, QThrea
 
 from utils import get_logger
 from scara.config.scara_config import ScaraConfig
-from scara.controller.do_client import set_uo as do_set_uo
+from scara.controller.do_client import set_uo_level as do_set_uo_level
 from scara.controller import enable_client as en_client
 
 logger = get_logger("scara.controller")
@@ -450,17 +450,17 @@ class ScaraController(QObject):
     def cmd_set_speed(self, pct):
         v = self._cfg.clamp_speed(pct)  # 钳到 [min,max]，防非UI/未来调用越界下发（clamp_speed 原为死代码）
         self._submit(f"速度 {v}%", f"setspeed {v}")
-    def cmd_set_do(self, i, on):
-        """走 scara_do.exe（方案 C）。会另开一条控制器连接，与 snrobot serve 互斥。"""
-        name = f"DO[{i}]={'1' if on else '0'}"
-        ch, val = int(i), bool(on)
+    def cmd_set_do(self, i, level):
+        """走 scara_do.exe（方案 C）。level 为 0 或 1（UO 电平）。会另开连接，与 snrobot serve 互斥。"""
+        ch, val = int(i), 1 if int(level) else 0
+        name = f"DO[{ch}]={val}"
         if self._connected:
             self.warning_occurred.emit(
-                "机械臂已连接：写 DO 可能因抢连接失败。测泵请先断开机械臂。"
+                "机械臂已连接：写 DO 可能因抢连接失败。测 DO 请先断开机械臂。"
             )
 
         def _fn():
-            ok, msg = do_set_uo(ch, val)
+            ok, msg = do_set_uo_level(ch, val)
             if not ok:
                 self.error_occurred.emit(msg or "scara_do 失败")
             else:

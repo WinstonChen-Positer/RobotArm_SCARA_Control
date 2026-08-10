@@ -1,0 +1,4 @@
+[
+  {"kind": "pump", "name": "主真空泵", "ch": 1},
+  {"kind": "valve", "name": "破真空阀", "ch": 2}
+]

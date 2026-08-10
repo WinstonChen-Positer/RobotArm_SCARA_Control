@@ -41,15 +41,15 @@ def _active_ip_port() -> Tuple[str, int]:
     raise RuntimeError(f"{cfg} 没有 Active 工位")
 
 
-def set_uo(
+def set_uo_level(
     channel: int,
-    on: bool,
+    level: int,
     *,
     timeout_s: float = 15.0,
     ip: Optional[str] = None,
     port: Optional[int] = None,
 ) -> Tuple[bool, str]:
-    """写用户输出 UO[channel]。on=True 表示开泵，False 表示停泵（见 UO_LEVEL_ON/OFF）。"""
+    """写用户输出 UO[channel]，电平 level 为 0 或 1。"""
     exe = exe_path()
     if not exe.is_file():
         return False, (
@@ -60,9 +60,9 @@ def set_uo(
     if ip is None or port is None:
         ip, port = _active_ip_port()
 
-    level = UO_LEVEL_ON if on else UO_LEVEL_OFF
+    lv = 1 if int(level) else 0
     cmd = [
-        str(exe), "set", str(int(channel)), str(level),
+        str(exe), "set", str(int(channel)), str(lv),
         "--ip", str(ip), "--port", str(int(port)),
     ]
     try:
@@ -82,3 +82,16 @@ def set_uo(
     if proc.returncode != 0:
         return False, out or f"exit={proc.returncode}"
     return True, out
+
+
+def set_uo(
+    channel: int,
+    on: bool,
+    *,
+    timeout_s: float = 15.0,
+    ip: Optional[str] = None,
+    port: Optional[int] = None,
+) -> Tuple[bool, str]:
+    """写用户输出 UO[channel]。on=True 表示开泵，False 表示停泵（见 UO_LEVEL_ON/OFF）。"""
+    level = UO_LEVEL_ON if on else UO_LEVEL_OFF
+    return set_uo_level(channel, level, timeout_s=timeout_s, ip=ip, port=port)

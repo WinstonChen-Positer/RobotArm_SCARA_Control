@@ -9,6 +9,7 @@ SCARA 机械臂控制界面
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -18,6 +19,7 @@ from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QGridLayout, QLabel, QPushButton,
     QLineEdit, QDoubleSpinBox, QSpinBox, QFrame, QSizePolicy, QPlainTextEdit,
     QProgressBar, QButtonGroup, QCheckBox, QComboBox, QScrollArea, QMessageBox,
+    QDialog,
 )
 
 from utils import get_logger
@@ -27,6 +29,8 @@ from scara.ui.camera_view import ScaraCameraThread
 from robot_arm.ui import theme as T
 
 logger = get_logger("scara.ui")
+
+DO_MAP_FILE = "scara_do_map.json"
 
 JOINT_NAME = ["J1", "J2", "J3", "J4"]
 JOINT_UNIT = ["°", "°", "mm", "°"]
@@ -200,8 +204,10 @@ class ScaraControlWidget(QWidget):
         self._pose_v: list[QLabel] = []
         self._light: dict[str, QLabel] = {}
         self._io_cells: list[QFrame] = []
+        self._do_entries: list[dict] = []
 
         self._build()
+        self._load_do_map()
         self._bind()
         for b in self.findChildren(QPushButton):   # 所有按钮去掉点击后的焦点虚线框
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -317,15 +323,28 @@ class ScaraControlWidget(QWidget):
         row.addWidget(self._preset_combo, 1); row.addWidget(self._btn_goto); row.addWidget(self._btn_del_preset)
         g.addLayout(row); v.addWidget(f)
 
-        f, g = _card("泵 / DO（scara_do）")
-        row = QHBoxLayout(); row.addWidget(QLabel("UO 通道"))
-        self._do_idx = QSpinBox(); self._do_idx.setRange(1, 4096); self._do_idx.setValue(1)
-        b1 = _btn("开泵", "success"); b0 = _btn("停泵")
-        b1.clicked.connect(lambda: self._ctrl.cmd_set_do(self._do_idx.value(), True))
-        b0.clicked.connect(lambda: self._ctrl.cmd_set_do(self._do_idx.value(), False))
-        row.addWidget(self._do_idx); row.addWidget(b1); row.addWidget(b0); row.addStretch(1)
+        f, g = _card("DO接口")
+        row = QHBoxLayout()
+        self._btn_add_do = _btn("新建", "primary")
+        self._btn_add_do.clicked.connect(self._show_add_do_dialog)
+        row.addWidget(self._btn_add_do); row.addStretch(1)
         g.addLayout(row)
-        tip = QLabel("写 DO 会另连控制器；机械臂已连接时可能失败，测泵请先断开机械臂。")
+        cols = QHBoxLayout(); cols.setSpacing(8)
+        for title, attr in [("泵", "_do_pump_col"), ("阀", "_do_valve_col")]:
+            box = QWidget()
+            vcol = QVBoxLayout(box); vcol.setSpacing(4); vcol.setContentsMargins(0, 0, 0, 0)
+            hdr = QLabel(title); hdr.setObjectName("kv")
+            vcol.addWidget(hdr)
+            inner = QWidget()
+            col = QVBoxLayout(inner); col.setSpacing(4); col.setContentsMargins(0, 0, 0, 0)
+            setattr(self, attr, col)
+            vcol.addWidget(inner)
+            cols.addWidget(box, 1)
+        g.addLayout(cols)
+        tip = QLabel(
+            "1/0 = 高/低电平；改后按回车才写入控制器。重启界面电平归零为 0。"
+            " 写 DO 会另连控制器；机械臂已连接时可能失败，请先断开机械臂。"
+        )
         tip.setObjectName("muted"); tip.setWordWrap(True)
         g.addWidget(tip)
         v.addWidget(f)
@@ -495,6 +514,144 @@ class ScaraControlWidget(QWidget):
             return
         btn.setProperty("cssClass", css)
         btn.style().unpolish(btn); btn.style().polish(btn)
+
+    def _load_do_map(self) -> None:
+        p = Path(DO_MAP_FILE)
+        if not p.is_file():
+            return
+        try:
+            rows = json.loads(p.read_text("utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("scara_do_map.json 读取失败: %s", exc)
+            return
+        if not isinstance(rows, list):
+            logger.warning("scara_do_map.json 格式错误：应为数组")
+            return
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            kind = row.get("kind")
+            name = row.get("name")
+            if kind not in ("pump", "valve") or not isinstance(name, str) or not name.strip():
+                continue
+            try:
+                ch = int(row.get("ch"))
+            except (TypeError, ValueError):
+                continue
+            if ch < 1 or ch > 16:
+                continue
+            if any(e["ch"] == ch for e in self._do_entries):
+                continue
+            if any(e["kind"] == kind and e["name"] == name.strip() for e in self._do_entries):
+                continue
+            self._add_do_row(kind, name.strip(), ch)
+
+    def _save_do_map(self) -> None:
+        data = [{"kind": e["kind"], "name": e["name"], "ch": e["ch"]} for e in self._do_entries]
+        try:
+            Path(DO_MAP_FILE).write_text(
+                json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.warning("写入 scara_do_map.json 失败: %s", exc)
+
+    def _apply_do_level(self, entry: dict) -> None:
+        lvl = entry["lvl"]
+        v = lvl.value()
+        if v not in (0, 1):
+            lvl.blockSignals(True)
+            lvl.setValue(entry["applied"])
+            lvl.blockSignals(False)
+            return
+        entry["applied"] = v
+        self._ctrl.cmd_set_do(entry["ch"], v)
+
+    def _revert_do_level_if_needed(self, entry: dict) -> None:
+        lvl = entry["lvl"]
+        if lvl.value() == entry["applied"]:
+            return
+        lvl.blockSignals(True)
+        lvl.setValue(entry["applied"])
+        lvl.blockSignals(False)
+
+    def _delete_do_row(self, entry: dict) -> None:
+        ans = QMessageBox.question(
+            self, "删除 DO 接口",
+            f"确认删除「{entry['name']}」（DO{entry['ch']}）？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        self._do_entries.remove(entry)
+        entry["widget"].deleteLater()
+        self._save_do_map()
+
+    def _add_do_row(self, kind: str, name: str, ch: int) -> None:
+        row_w = QWidget()
+        row = QHBoxLayout(row_w); row.setContentsMargins(0, 0, 0, 0); row.setSpacing(4)
+        name_lbl = QLabel(name); name_lbl.setObjectName("kv")
+        do_lbl = QLabel(f"DO{ch}"); do_lbl.setObjectName("muted")
+        lvl = QSpinBox(); lvl.setRange(0, 1); lvl.setFixedWidth(44)
+        lvl.setKeyboardTracking(False)
+        lvl.setValue(0)
+        lvl.setToolTip("0=低电平  1=高电平；按回车写入")
+        entry: dict = {"kind": kind, "name": name, "ch": ch, "widget": row_w, "lvl": lvl, "applied": 0}
+        lvl.lineEdit().returnPressed.connect(lambda: self._apply_do_level(entry))
+        lvl.lineEdit().editingFinished.connect(lambda: self._revert_do_level_if_needed(entry))
+        del_btn = _btn("删")
+        del_btn.clicked.connect(lambda _, e=entry: self._delete_do_row(e))
+        row.addWidget(name_lbl); row.addWidget(do_lbl); row.addStretch(1)
+        row.addWidget(lvl); row.addWidget(del_btn)
+        col = self._do_pump_col if kind == "pump" else self._do_valve_col
+        col.addWidget(row_w)
+        self._do_entries.append(entry)
+
+    def _show_add_do_dialog(self) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("新建 DO 接口")
+        v = QVBoxLayout(dlg)
+        form = QGridLayout(); form.setHorizontalSpacing(8); form.setVerticalSpacing(6)
+        type_cb = QComboBox(); type_cb.addItems(["泵", "阀"])
+        name_edit = QLineEdit(); name_edit.setPlaceholderText("自定义名称")
+        do_spin = QSpinBox(); do_spin.setRange(1, 16)
+        do_spin.setMinimumWidth(56); do_spin.setKeyboardTracking(False)
+        form.addWidget(QLabel("类型"), 0, 0); form.addWidget(type_cb, 0, 1)
+        form.addWidget(QLabel("名称"), 1, 0); form.addWidget(name_edit, 1, 1)
+        form.addWidget(QLabel("DO号"), 2, 0); form.addWidget(do_spin, 2, 1)
+        v.addLayout(form)
+        btns = QHBoxLayout(); btns.addStretch(1)
+        cancel = _btn("取消"); ok = _btn("确定", "primary")
+        cancel.clicked.connect(dlg.reject)
+        btns.addWidget(cancel); btns.addWidget(ok)
+        v.addLayout(btns)
+        accepted_row: Optional[tuple[str, str, int]] = None
+
+        def _try_accept() -> None:
+            nonlocal accepted_row
+            kind = "pump" if type_cb.currentIndex() == 0 else "valve"
+            name = name_edit.text().strip()
+            if not name:
+                QMessageBox.warning(dlg, "新建 DO 接口", "请填写名称。")
+                return
+            ch = do_spin.value()
+            for e in self._do_entries:
+                if e["ch"] == ch:
+                    QMessageBox.warning(dlg, "新建 DO 接口", f"DO{ch} 已绑定到「{e['name']}」。")
+                    return
+                if e["kind"] == kind and e["name"] == name:
+                    QMessageBox.warning(dlg, "新建 DO 接口", f"「{name}」已存在。")
+                    return
+            accepted_row = (kind, name, ch)
+            dlg.accept()
+
+        ok.clicked.connect(_try_accept)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted or accepted_row is None:
+            return
+        kind, name, ch = accepted_row
+        self._add_do_row(kind, name, ch)
+        self._save_do_map()
 
     def _on_home_clicked(self) -> None:
         ans = QMessageBox.question(
