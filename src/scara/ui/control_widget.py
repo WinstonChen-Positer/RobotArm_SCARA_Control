@@ -17,7 +17,7 @@ from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QGridLayout, QLabel, QPushButton,
     QLineEdit, QDoubleSpinBox, QSpinBox, QFrame, QSizePolicy, QPlainTextEdit,
-    QProgressBar, QButtonGroup, QCheckBox, QComboBox, QScrollArea,
+    QProgressBar, QButtonGroup, QCheckBox, QComboBox, QScrollArea, QMessageBox,
 )
 
 from utils import get_logger
@@ -36,55 +36,100 @@ POSE_UNIT = ["mm", "mm", "mm", "°", "°", "°"]
 
 _CHK = Path(__file__).parent.joinpath("check.svg").as_posix()
 
+# SCARA 页局部深色色板（不改全局 design_system，DUCO 页保持浅色）
+_D = {
+    "bg": "#0F172A",
+    "bg2": "#1E293B",
+    "card": "#1E293B",
+    "glass": "#334155",
+    "border": "#334155",
+    "border_soft": "#475569",
+    "text": "#E2E8F0",
+    "text2": "#94A3B8",
+    "muted": "#64748B",
+    "primary": "#3B82F6",
+    "primary_soft": "#1E3A5F",
+    "accent": "#22D3EE",
+    "accent_soft": "#164E63",
+    "success": "#34D399",
+    "error": "#F87171",
+    "warning": "#FBBF24",
+    "io_off": "#475569",
+    "chip_off_bg": "#334155",
+    "chip_on_bg": "#064E3B",
+    "bar_bg": "#334155",
+    "log_bg": "#0B1220",
+    "input_bg": "#0F172A",
+    "seg_bg": "#1E293B",
+}
+
 SUPPLEMENT = f"""
-QWidget#scaraRoot {{ background-color:{T.BG_DARK}; }}
-QWidget {{ font-size:12px; }}
+QWidget#scaraRoot {{ background-color:{_D['bg']}; color:{_D['text']}; }}
+QWidget {{ font-size:12px; color:{_D['text']}; }}
+QLabel {{ color:{_D['text']}; }}
+QCheckBox {{ color:{_D['text2']}; }}
 QCheckBox::indicator {{ width:15px; height:15px; border-radius:4px;
-    border:1px solid {T.BORDER_COLOR}; background:{T.BG_GLASS}; }}
-QCheckBox::indicator:checked {{ background:{T.ACCENT_COLOR}; border-color:{T.ACCENT_COLOR};
+    border:1px solid {_D['border']}; background:{_D['glass']}; }}
+QCheckBox::indicator:checked {{ background:{_D['accent']}; border-color:{_D['accent']};
     image:url({_CHK}); }}
-#card {{ background:{T.BG_CARD}; border:1px solid {T.BORDER_COLOR}; border-radius:14px; }}
-#cardBar {{ background:{T.ACCENT_COLOR}; border-radius:2px; }}
-/* 栏目标题：与基准页 orchestrator/ui/control_widget.APP_QSS 逐值一致（2026-07-28 统一）。
-   卡头只放标题，原 #cardHint 说明行已全仓移除。 */
-#cardTitle {{ color:{T.ACCENT_COLOR}; font-weight:900; font-size:12px; letter-spacing:0.7px; }}
+#card {{ background:{_D['card']}; border:1px solid {_D['border']}; border-radius:14px; }}
+#cardBar {{ background:{_D['accent']}; border-radius:2px; }}
+#cardTitle {{ color:{_D['accent']}; font-weight:900; font-size:12px; letter-spacing:0.7px; }}
 #colScroll, #colScroll > QWidget > QWidget {{ background:transparent; border:none; }}
-#kv {{ color:{T.TEXT_SECONDARY}; font-size:12px; }}
-#val {{ font-family:{T.MONO}; font-weight:700; font-size:13px; color:{T.TEXT_PRIMARY}; }}
-#jname {{ font-family:{T.MONO}; font-weight:700; color:{T.PRIMARY_COLOR}; font-size:12px; }}
-#muted {{ color:{T.TEXT_MUTED}; font-size:11px; }}
+#kv {{ color:{_D['text2']}; font-size:12px; }}
+#val {{ font-family:{T.MONO}; font-weight:700; font-size:13px; color:{_D['text']}; }}
+#jname {{ font-family:{T.MONO}; font-weight:700; color:{_D['primary']}; font-size:12px; }}
+#muted {{ color:{_D['muted']}; font-size:11px; }}
 #pill {{ border-radius:9px; padding:1px 9px; font-size:11px; font-weight:700; }}
-#light {{ background:{T.BG_GLASS}; border:1px solid {T.BORDER_SOFT}; border-radius:7px; }}
-#lightK {{ color:{T.TEXT_SECONDARY}; font-size:11px; }}
-#io {{ background:#E7ECF3; border:1px solid {T.BORDER_SOFT}; border-radius:2px; min-width:11px; min-height:11px; }}
-#ioOn {{ background:{T.SUCCESS_COLOR}; border:1px solid {T.SUCCESS_COLOR}; border-radius:2px; min-width:11px; min-height:11px; }}
-#cam {{ background:#0b1220; border-radius:8px; color:{T.TEXT_MUTED}; font-size:13px; }}
-QPushButton {{ padding:4px 9px; min-height:22px; outline:none; }}
+#light {{ background:{_D['glass']}; border:1px solid {_D['border_soft']}; border-radius:7px; }}
+#lightK {{ color:{_D['text2']}; font-size:11px; }}
+#io {{ background:{_D['io_off']}; border:1px solid {_D['border_soft']}; border-radius:2px; min-width:11px; min-height:11px; }}
+#ioOn {{ background:{_D['success']}; border:1px solid {_D['success']}; border-radius:2px; min-width:11px; min-height:11px; }}
+#cam {{ background:#0b1220; border-radius:8px; color:{_D['muted']}; font-size:13px; }}
+QPushButton {{ padding:4px 9px; min-height:22px; outline:none;
+    background:{_D['glass']}; color:{_D['text']}; border:1px solid {_D['border']}; border-radius:7px; }}
+QPushButton:hover {{ background:{_D['border_soft']}; }}
 QPushButton:focus {{ outline:none; }}
-QPushButton:pressed {{ background:{T.PRIMARY_SOFT}; }}
+QPushButton:pressed {{ background:{_D['primary_soft']}; }}
+QPushButton:disabled {{ color:{_D['muted']}; background:#1a2332; border-color:#243044; }}
+QPushButton[cssClass="primary"] {{ background:{_D['primary']}; color:#fff; border:none; }}
+QPushButton[cssClass="primary"]:hover {{ background:#2563EB; }}
 QPushButton[cssClass="primary"]:pressed {{ background:#1D54CC; }}
-QPushButton[cssClass="success"]:pressed {{ background:#1A8A5E; }}
-QPushButton[cssClass="jog"]:pressed {{ background:{T.ACCENT_SOFT}; border-color:{T.ACCENT_COLOR}; }}
+QPushButton[cssClass="success"] {{ background:{_D['success']}; color:#0F172A; border:none; }}
+QPushButton[cssClass="success"]:pressed {{ background:#1A8A5E; color:#fff; }}
+QPushButton[cssClass="jog"] {{ background:{_D['bg2']}; color:{_D['text']}; border:1px solid {_D['border']}; }}
+QPushButton[cssClass="jog"]:pressed {{ background:{_D['accent_soft']}; border-color:{_D['accent']}; }}
 QPushButton#estop:pressed {{ background:#B23244; }}
-QPushButton#estop {{ background:{T.ERROR_COLOR}; color:#fff; border:none; border-radius:7px;
+QPushButton#estop {{ background:{_D['error']}; color:#fff; border:none; border-radius:7px;
     font-size:13px; font-weight:800; letter-spacing:2px; min-height:0; padding:2px 16px; }}
 QPushButton#estop:hover {{ background:#C53B4C; }}
-QPushButton#estop:disabled {{ background:#E8A6AE; color:#FBEAEC; }}
+QPushButton#estop:disabled {{ background:#7F1D1D; color:#FECACA; }}
 QPushButton#cambtn {{ background:#1e293b; color:#e2e8f0; border:1px solid #334155; }}
 QPushButton#cambtn:hover {{ background:#273449; }}
-/* JOG 按键：清晰大字号 + 足够高度（原 min-height:0 会把 −/+ 压没）*/
 QPushButton[cssClass="jog"] {{ min-height:34px; padding:4px 8px; border-radius:9px;
     font-size:15px; font-weight:700; letter-spacing:1px; }}
-QLineEdit, QDoubleSpinBox, QSpinBox, QComboBox {{ min-height:20px; padding:2px 6px; }}
-QPushButton#seg {{ border-radius:0; background:{T.BG_CARD}; color:{T.TEXT_SECONDARY};
-    padding:5px 3px; border:1px solid {T.BORDER_COLOR}; font-weight:600; }}
-QPushButton#seg:checked {{ background:{T.PRIMARY_COLOR}; color:#fff; border-color:{T.PRIMARY_COLOR}; }}
-QProgressBar#posbar {{ border:none; background:#E8EEF6; border-radius:4px; max-height:8px; min-height:8px; }}
+QLineEdit, QDoubleSpinBox, QSpinBox, QComboBox {{
+    min-height:20px; padding:2px 6px;
+    background:{_D['input_bg']}; color:{_D['text']};
+    border:1px solid {_D['border']}; border-radius:6px; }}
+QComboBox::drop-down {{ border:none; }}
+QComboBox QAbstractItemView {{
+    background:{_D['card']}; color:{_D['text']}; selection-background-color:{_D['primary']}; }}
+QPushButton#seg {{ border-radius:0; background:{_D['seg_bg']}; color:{_D['text2']};
+    padding:5px 3px; border:1px solid {_D['border']}; font-weight:600; }}
+QPushButton#seg:checked {{ background:{_D['primary']}; color:#fff; border-color:{_D['primary']}; }}
+QProgressBar#posbar {{ border:none; background:{_D['bar_bg']}; border-radius:4px; max-height:8px; min-height:8px; }}
 QProgressBar#posbar::chunk {{ background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
-    stop:0 #7CC1EE, stop:1 {T.PRIMARY_COLOR}); border-radius:4px; }}
-QPlainTextEdit#logbox {{ background:#F8FAFD; border:1px solid {T.BORDER_SOFT}; border-radius:8px;
-    font-family:{T.MONO}; font-size:11px; color:{T.TEXT_SECONDARY}; }}
+    stop:0 #7CC1EE, stop:1 {_D['primary']}); border-radius:4px; }}
+QPlainTextEdit#logbox {{ background:{_D['log_bg']}; border:1px solid {_D['border_soft']}; border-radius:8px;
+    font-family:{T.MONO}; font-size:11px; color:{_D['text2']}; }}
 QLabel#chip {{ border-radius:11px; padding:2px 9px; font-size:11px; font-weight:700; }}
+QScrollArea#colScroll QScrollBar:vertical {{
+    background:transparent; width:8px; margin:0; }}
+QScrollArea#colScroll QScrollBar::handle:vertical {{
+    background:{_D['border_soft']}; border-radius:4px; min-height:24px; }}
+QScrollArea#colScroll QScrollBar::add-line:vertical,
+QScrollArea#colScroll QScrollBar::sub-line:vertical {{ height:0; }}
 """
 
 
@@ -143,7 +188,8 @@ class ScaraControlWidget(QWidget):
                  owns_controller: bool = True):
         super().__init__(parent)
         self.setObjectName("scaraRoot")
-        self.setStyleSheet(T.APP_STYLESHEET + SUPPLEMENT)
+        # 仅用本页深色 SUPPLEMENT，避免全局浅色 APP_STYLESHEET 盖住深色卡片/输入框
+        self.setStyleSheet(SUPPLEMENT)
         self._cfg = config or load_scara_config()
         self._owns = owns_controller
         self._ctrl = controller or ScaraController(self._cfg)
@@ -210,13 +256,14 @@ class ScaraControlWidget(QWidget):
         row = QHBoxLayout()
         self._btn_conn = _btn("连接", "primary"); self._btn_disc = _btn("断开")
         self._conn_chip = QLabel("● 未连接"); self._conn_chip.setObjectName("chip")
-        self._conn_chip.setStyleSheet(f"color:{T.TEXT_MUTED}; background:#EAF0F7;")
+        self._conn_chip.setStyleSheet(f"color:{_D['muted']}; background:{_D['chip_off_bg']};")
         row.addWidget(self._btn_conn); row.addWidget(self._btn_disc); row.addStretch(1); row.addWidget(self._conn_chip)
         g.addLayout(row); v.addWidget(f)
 
         f, g = _card("伺服 / 安全")
         row = QHBoxLayout()
-        self._btn_en = _btn("使能", "success"); self._btn_dis = _btn("去使能")
+        self._btn_en = _btn("使能")  # 不默认 success，避免未读状态就显绿「已使能」
+        self._btn_dis = _btn("去使能")
         self._btn_clr = _btn("清报警"); self._btn_home = _btn("回零")
         for b in (self._btn_en, self._btn_dis, self._btn_clr, self._btn_home):
             row.addWidget(b)
@@ -376,7 +423,7 @@ class ScaraControlWidget(QWidget):
         self._btn_en.clicked.connect(self._ctrl.cmd_enable)
         self._btn_dis.clicked.connect(self._ctrl.cmd_disable)
         self._btn_clr.clicked.connect(self._ctrl.cmd_clear_alarm)
-        self._btn_home.clicked.connect(self._ctrl.cmd_home)
+        self._btn_home.clicked.connect(self._on_home_clicked)
         self._btn_estop.clicked.connect(self._ctrl.emergency_stop)
         self._mode_grp.idClicked.connect(lambda i: self._ctrl.cmd_set_mode(["T1", "T2", "Execute"][i]))
         self._speed.valueChanged.connect(lambda val: self._ctrl.cmd_set_speed(val))
@@ -388,11 +435,11 @@ class ScaraControlWidget(QWidget):
         self._ctrl.connection_changed.connect(self._on_conn)
         self._ctrl.status_updated.connect(self._on_status)
         self._ctrl.presets_changed.connect(self._on_presets)
-        self._ctrl.error_occurred.connect(lambda m: self._append("错误", m, T.ERROR_COLOR))
-        self._ctrl.warning_occurred.connect(lambda m: self._append("警告", m, T.WARNING_COLOR))
-        self._ctrl.info_occurred.connect(lambda m: self._append("信息", m, T.TEXT_SECONDARY))
+        self._ctrl.error_occurred.connect(lambda m: self._append("错误", m, _D["error"]))
+        self._ctrl.warning_occurred.connect(lambda m: self._append("警告", m, _D["warning"]))
+        self._ctrl.info_occurred.connect(lambda m: self._append("信息", m, _D["text2"]))
         self._ctrl.command_finished.connect(
-            lambda name, ok, msg: self._append("OK" if ok else "失败", name, T.SUCCESS_COLOR if ok else T.ERROR_COLOR))
+            lambda name, ok, msg: self._append("OK" if ok else "失败", name, _D["success"] if ok else _D["error"]))
 
     def _jog_press(self, axis, direction: str) -> None:
         if self._cont.isChecked():
@@ -428,7 +475,7 @@ class ScaraControlWidget(QWidget):
             return
         self._cam = ScaraCameraThread(index=self._cam_idx.value())
         self._cam.frame_ready.connect(self._on_frame)
-        self._cam.error.connect(lambda m: (self._append("相机", m, T.ERROR_COLOR), setattr(self, "_cam", None), self._btn_cam.setText("连接相机")))
+        self._cam.error.connect(lambda m: (self._append("相机", m, _D["error"]), setattr(self, "_cam", None), self._btn_cam.setText("连接相机")))
         self._cam.start(); self._btn_cam.setText("断开相机")
 
     def _on_frame(self, img: QImage) -> None:
@@ -440,7 +487,7 @@ class ScaraControlWidget(QWidget):
         if self._cam is not None:
             path = datetime.now().strftime("scara_snap_%Y%m%d_%H%M%S.jpg")
             if self._cam.snapshot(path):
-                self._append("相机", f"快照已保存 {path}", T.SUCCESS_COLOR)
+                self._append("相机", f"快照已保存 {path}", _D["success"])
 
     def _set_css(self, btn: QPushButton, css: str) -> None:
         """运行时改按钮 cssClass 并重新应用样式。"""
@@ -448,6 +495,16 @@ class ScaraControlWidget(QWidget):
             return
         btn.setProperty("cssClass", css)
         btn.style().unpolish(btn); btn.style().polish(btn)
+
+    def _on_home_clicked(self) -> None:
+        ans = QMessageBox.question(
+            self, "回零确认",
+            "回零会让机械臂自动运动到原点，确认继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ans == QMessageBox.StandardButton.Yes:
+            self._ctrl.cmd_home()
 
     def _on_connect_clicked(self) -> None:
         # 连接握手（启动 snrobot.exe + 读状态）是阻塞 I/O：若在 GUI 线程直接跑，
@@ -459,25 +516,37 @@ class ScaraControlWidget(QWidget):
     def _on_conn(self, ok: bool) -> None:
         self._conn_chip.setText("● 已连接" if ok else "● 未连接")
         self._conn_chip.setStyleSheet(
-            f"color:{T.SUCCESS_COLOR}; background:#E7F6EF;" if ok else f"color:{T.TEXT_MUTED}; background:#EAF0F7;")
+            f"color:{_D['success']}; background:{_D['chip_on_bg']};"
+            if ok else f"color:{_D['muted']}; background:{_D['chip_off_bg']};"
+        )
         # 连接/断开 按实际连接状态互斥
         self._btn_conn.setEnabled(not ok)
         self._btn_disc.setEnabled(ok)
-        # 未连接时控制类按钮全部置灰
+        # 未连接时控制类按钮全部置灰；已连接时去使能保持可点（不因灯显示 OFF 而灰掉）
         for b in (self._btn_en, self._btn_dis, self._btn_clr, self._btn_home, self._btn_estop):
             b.setEnabled(ok)
         if not ok:
-            self._set_css(self._btn_en, "")     # 断开时"使能"不亮绿
-            self._btn_dis.setEnabled(False)
-            for k in self._light:               # 状态灯复位
-                self._set_light(k, "—", True) if False else self._light[k].setText("—")
+            self._set_css(self._btn_en, "")
+            self._set_css(self._btn_clr, "")
+            for k in self._light:
+                self._set_light(k, "—", True)
 
     def _on_status(self, st: dict) -> None:
-        # —— 按钮状态跟随真实状态 —— #
-        en = int(st.get("enable", 0))
-        self._set_css(self._btn_en, "success" if en == 1 else "")  # 绿色只在已使能时亮
-        self._btn_en.setEnabled(True)
-        self._btn_dis.setEnabled(en == 1)       # 只有已使能才能"去使能"
+        connected = self._ctrl.is_connected()
+        en_eff = bool(st.get("effectively_enabled"))
+        need_clear = bool(st.get("need_clear"))
+        estop = bool(st.get("estop") or st.get("soft_estop"))
+        warn = int(st.get("warn", 0))
+        en_raw = int(st.get("enable", 0)) == 1
+
+        # 使能：仅「有效使能」时亮绿；急停/报警时不可点（引导去清报警）
+        self._set_css(self._btn_en, "success" if en_eff else "")
+        # 清报警：急停或报警时亮绿，提示下一步该点它
+        self._set_css(self._btn_clr, "success" if (connected and need_clear) else "")
+        if connected:
+            self._btn_en.setEnabled(not need_clear and not en_eff)
+            self._btn_dis.setEnabled(en_raw and not need_clear)
+            self._btn_clr.setEnabled(True)
         # 模式段跟随实际模式
         idx = {"T1": 0, "T2": 1, "Execute": 2}.get(st.get("mode", ""), None)
         if idx is not None:
@@ -492,10 +561,9 @@ class ScaraControlWidget(QWidget):
         for i in range(6):
             self._pose_v[i].setText(f"{st['pose'][i]:.2f}")
         self._speed_bar.setValue(int(round(st.get("speed", 0))))
-        en = st.get("enable", 0); warn = st.get("warn", 0)
-        self._set_light("使能", "ON" if en == 1 else "OFF", en == 1)
-        self._set_light("运行状态", "报警" if warn else "正常", warn == 0)
-        self._set_light("急停", "未触发", True)
+        self._set_light("使能", "ENABLE_ON" if en_eff else "ENABLE_OFF", en_eff)
+        self._set_light("运行状态", "ALARM_ON" if warn else "ALARM_OFF", warn == 0)
+        self._set_light("急停", "ESTOP_ON" if estop else "ESTOP_OFF", not estop)
         self._set_light("模式", st.get("mode", "—"), True, info=True)
         self._set_light("循环", "单循环", True, info=True)
         self._set_light("机械锁", "ON" if st.get("mechlock") else "OFF", st.get("mechlock") == 0)
@@ -511,12 +579,12 @@ class ScaraControlWidget(QWidget):
         if not lbl:
             return
         lbl.setText(text)
-        color = T.PRIMARY_COLOR if info else (T.SUCCESS_COLOR if good else T.ERROR_COLOR)
+        color = _D["primary"] if info else (_D["success"] if good else _D["error"])
         lbl.setStyleSheet(f"font-weight:700; font-size:12px; color:{color};")
 
     def _append(self, tag: str, msg: str, color: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
-        self._log.appendHtml(f'<span style="color:{T.TEXT_MUTED}">{ts}</span> '
+        self._log.appendHtml(f'<span style="color:{_D["muted"]}">{ts}</span> '
                              f'<span style="color:{color}">[{tag}]</span> {msg}')
 
     def cleanup(self) -> None:

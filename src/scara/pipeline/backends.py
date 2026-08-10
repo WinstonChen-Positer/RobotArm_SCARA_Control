@@ -390,7 +390,8 @@ class ScaraMotionAdapter:
         if not self._c.is_connected():
             return False
         st = self._read()
-        return bool(st) and int(st.get("enable", 0)) == 1 and int(st.get("warn", 0)) == 0
+        return bool(st) and bool(st.get("effectively_enabled",
+            int(st.get("enable", 0)) == 1 and int(st.get("warn", 0)) == 0))
 
     def _wait_settle(self, key: str, dim: int) -> bool:
         """轮询 read_all_sync[key][:dim]，连续 settle_count 次不动或超时。"""

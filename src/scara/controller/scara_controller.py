@@ -21,6 +21,7 @@ from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal, QRunnable, QThrea
 from utils import get_logger
 from scara.config.scara_config import ScaraConfig
 from scara.controller.do_client import set_uo as do_set_uo
+from scara.controller import enable_client as en_client
 
 logger = get_logger("scara.controller")
 
@@ -55,6 +56,9 @@ class ScaraController(QObject):
         self._connected = False
         self._connecting = False                 # connect_async 在途标志，防重入起双进程
         self._last_status: dict = {}
+        self._soft_estop = False              # 软件急停锁存（点急停置位，清报警清除）
+        # 安全状态以 scara_enable（Read_PowerOn/Stop/Warning）为准，不用 snrobot ENABLE/CONTROL
+        self._safety: dict = {"enable": 0, "estop": False, "warn": 0, "mode": "?"}
         self._pool = QThreadPool.globalInstance()
         self._poller: Optional["_PollThread"] = None
         self._presets: dict = {}
@@ -215,10 +219,13 @@ class ScaraController(QObject):
                 k = t[0]
                 if k == "JOINT": st["joints"] = [float(x) for x in t[1:5]]
                 elif k == "POSE": st["pose"] = [float(x) for x in t[1:7]]
-                elif k == "ENABLE": st["enable"] = int(t[1])
+                elif k == "ENABLE":
+                    pass  # 忽略 snrobot ENABLE，改用 scara_enable Read_PowerOn
                 elif k == "MODE": st["mode"] = t[1]
-                elif k == "WARN": st["warn"] = int(t[1])
-                elif k == "CONTROL": st["control"] = int(t[1])
+                elif k == "WARN":
+                    pass  # 忽略 snrobot WARN，改用 Read_Warning
+                elif k == "CONTROL":
+                    st["control"] = int(t[1])  # 仅保留原始值；急停不以它为准
                 elif k == "SPEED": st["speed"] = float(t[1])
                 elif k == "MECHLOCK": st["mechlock"] = int(t[1])
                 elif k == "DI_ON":
@@ -229,7 +236,68 @@ class ScaraController(QObject):
                     st["do_list"] = [int(x) for x in t[2].split(",") if x] if len(t) > 2 else []
             except (ValueError, IndexError):
                 continue
+        return self._merge_safety(st)
+
+    def _merge_safety(self, st: dict) -> dict:
+        """用 scara_enable overlay 覆盖使能/急停/报警（及可信 mode）。"""
+        saf = self._safety or {}
+        st["enable"] = int(saf.get("enable", 0))
+        hw_estop = bool(saf.get("estop", False))
+        st["warn"] = int(saf.get("warn", 0))
+        mode = saf.get("mode") or "?"
+        if mode and mode != "?":
+            st["mode"] = mode
+        st["soft_estop"] = bool(self._soft_estop)
+        st["estop"] = bool(self._soft_estop) or hw_estop
+        st["effectively_enabled"] = (
+            int(st["enable"]) == 1
+            and not st["estop"]
+            and int(st["warn"]) == 0
+        )
+        st["need_clear"] = bool(st["estop"] or int(st["warn"]) != 0)
         return st
+
+    def _apply_safety_from_text(self, text: str) -> dict:
+        parsed = en_client.parse_status(text or "")
+        self._safety.update(parsed)
+        return parsed
+
+    def _run_enable_exe(self, *args: str) -> Tuple[bool, str, dict]:
+        """临时断开 snrobot serve → 调 scara_enable → 再拉起 serve。
+
+        返回 (ok, 输出文本, 解析出的 safety dict)。
+        """
+        was_connected = self._connected
+        self._stop_polling()
+        self._stop_proc()
+        ip = self._cfg.controller_ip
+        port = int(self._cfg.controller_port)
+        ok, out = en_client.run_cmd(*args, ip=ip, port=port)
+        safety = self._apply_safety_from_text(out)
+        if was_connected:
+            if not self._start_proc():
+                self._connected = False
+                if self._last_status:
+                    self._last_status = self._merge_safety(dict(self._last_status))
+                    self.status_updated.emit(self._last_status)
+                self.error_occurred.emit("scara_enable 后重新连接 snrobot 失败")
+                self.connection_changed.emit(False)
+                return ok, out, safety
+            st = self.read_all_sync()
+            if st is not None:
+                self._last_status = st
+                self.status_updated.emit(st)
+            else:
+                if self._last_status:
+                    self._last_status = self._merge_safety(dict(self._last_status))
+                    self.status_updated.emit(self._last_status)
+            self._start_polling()
+        return ok, out, safety
+
+    def _refresh_safety_status(self) -> Tuple[bool, str]:
+        """用 scara_enable status 校正使能/急停/报警灯。"""
+        ok, out, _ = self._run_enable_exe("status")
+        return ok, out
 
     @staticmethod
     def _ok(out: str) -> bool:
@@ -269,6 +337,11 @@ class ScaraController(QObject):
             return False
         self._connected = True
         self._last_status = st
+        # 用 scara_enable 校正使能/急停/报警（短暂断 serve）
+        ok_s, msg_s = self._refresh_safety_status()
+        if not ok_s:
+            self.warning_occurred.emit(f"安全状态读取失败: {(msg_s or '')[:120]}")
+        st = self._last_status or st
         self.info_occurred.emit(f"已连接控制器 {self._cfg.controller_ip}:{self._cfg.controller_port}")
         self.connection_changed.emit(True)
         self.status_updated.emit(st)
@@ -289,6 +362,8 @@ class ScaraController(QObject):
         self._stop_polling()
         self._stop_proc()
         self._connected = False
+        self._soft_estop = False
+        self._safety = {"enable": 0, "estop": False, "warn": 0, "mode": "?"}
         self.info_occurred.emit("已断开")
         self.connection_changed.emit(False)
 
@@ -312,10 +387,66 @@ class ScaraController(QObject):
         self._pool.start(_Command(self, name, line))
 
     # —— 供 UI 的异步命令 —— #
-    def cmd_enable(self):        self._submit("使能", "enable")
-    def cmd_disable(self):       self._submit("去使能", "disable")
-    def cmd_clear_alarm(self):   self._submit("清报警", "clearalarm")
+    # 使能/去使能/急停/清报警走 scara_enable.exe（与 tools/uitest/test_enable 一致）。
+    # 调用时临时断开 snrobot serve，避免抢 TCP。
+
+    def cmd_enable(self):
+        """使能：scara_enable enable（Send_PowerOn 脉冲）。"""
+        def _fn():
+            st0 = self._last_status or {}
+            if st0.get("need_clear") or st0.get("estop") or int(st0.get("warn", 0)) != 0:
+                self.error_occurred.emit("有急停或报警，请先点「清报警」再使能")
+                return False, "blocked"
+            ok, out, safety = self._run_enable_exe("enable")
+            if not ok:
+                self.error_occurred.emit(f"使能失败: {(out or '').strip()[:160] or '无输出'}")
+                return False, out
+            if int(safety.get("enable", 0)) != 1 or safety.get("estop") or int(safety.get("warn", 0)) != 0:
+                reason = "急停未解除" if safety.get("estop") else (
+                    "仍有报警" if int(safety.get("warn", 0)) else "ENABLE 仍为 OFF")
+                self.error_occurred.emit(f"使能未生效（{reason}）")
+                return False, out
+            return True, out
+        self._pool.start(_Command(self, "使能", None, fn=_fn))
+
+    def cmd_disable(self):
+        """去使能：scara_enable disable（SetMode 来回切）。"""
+        def _fn():
+            st0 = self._last_status or {}
+            if st0 and int(st0.get("enable", 0)) != 1:
+                self.info_occurred.emit("当前已是未使能，无需去使能")
+                return True, "already_off"
+            ok, out, safety = self._run_enable_exe("disable")
+            if int(safety.get("enable", 0)) != 1:
+                return True, out
+            if not ok:
+                self.error_occurred.emit(f"去使能失败: {(out or '').strip()[:160] or '无输出'}")
+                return False, out
+            self.error_occurred.emit("去使能未生效（ENABLE 仍为 ON）")
+            return False, out
+        self._pool.start(_Command(self, "去使能", None, fn=_fn))
+
+    def cmd_clear_alarm(self):
+        """清报警：scara_enable clear_alarm。"""
+        def _fn():
+            ok, out, safety = self._run_enable_exe("clear_alarm")
+            cleared = (not safety.get("estop")) and int(safety.get("warn", 0)) == 0
+            if cleared:
+                self._soft_estop = False
+                # 重新 merge 一次以清 soft_estop
+                if self._last_status:
+                    self._last_status = self._merge_safety(dict(self._last_status))
+                    self.status_updated.emit(self._last_status)
+                return True, out
+            self.error_occurred.emit(
+                f"清报警未完全成功: 急停={'ON' if safety.get('estop') else 'OFF'} "
+                f"报警={'ON' if int(safety.get('warn', 0)) else 'OFF'} "
+                f"{(out or '')[:80]}")
+            return False, out
+        self._pool.start(_Command(self, "清报警", None, fn=_fn))
+
     def cmd_set_mode(self, m):   self._submit(f"模式 {m}", f"setmode {MODE_CODE.get(m,1)}")
+
     def cmd_set_speed(self, pct):
         v = self._cfg.clamp_speed(pct)  # 钳到 [min,max]，防非UI/未来调用越界下发（clamp_speed 原为死代码）
         self._submit(f"速度 {v}%", f"setspeed {v}")
@@ -371,8 +502,31 @@ class ScaraController(QObject):
         self._submit("jog停", f"jogstop {code}")
 
     def emergency_stop(self):
-        self.warning_occurred.emit("急停触发：停止所有运动并去使能")
-        self._submit("急停", "stopall")
+        """急停：scara_enable estop（Send_Stop）。先软锁存亮灯，再断 serve 发命令。"""
+        self._soft_estop = True
+        self.warning_occurred.emit("急停触发")
+        snap = dict(self._last_status) if self._last_status else {
+            "joints": [0.0] * 4, "pose": [0.0] * 6, "enable": 0, "mode": "?",
+            "warn": 0, "control": 0, "speed": 0.0, "mechlock": 0, "di_on": 0, "do_on": 0,
+            "do_list": [],
+        }
+        snap["soft_estop"] = True
+        snap["estop"] = True
+        snap["enable"] = 0
+        snap["effectively_enabled"] = False
+        snap["need_clear"] = True
+        self._last_status = snap
+        self.status_updated.emit(snap)
+
+        def _fn():
+            ok, out, safety = self._run_enable_exe("estop")
+            if safety.get("estop") or int(safety.get("warn", 0)) != 0:
+                ok = True
+            if not ok:
+                self.error_occurred.emit(
+                    f"急停失败: {(out or '').strip()[:160] or '无输出'}")
+            return ok, out or ""
+        self._pool.start(_Command(self, "急停", None, fn=_fn))
 
     # —— 预设点 —— #
     def save_preset(self, name: str) -> None:
@@ -417,7 +571,9 @@ class ScaraController(QObject):
     def _motion_guard(self) -> bool:
         if not self._connected:
             self.warning_occurred.emit("未连接，无法运动"); return False
-        if self._cfg.require_enable_before_motion and int(self._last_status.get("enable", 0)) != 1:
+        if self._cfg.require_enable_before_motion and not bool(self._last_status.get("effectively_enabled")):
+            if self._last_status.get("need_clear"):
+                self.warning_occurred.emit("有急停/报警，请先清报警再使能"); return False
             self.warning_occurred.emit("未使能，请先点击“使能”"); return False
         if int(self._last_status.get("warn", 0)) != 0:
             self.warning_occurred.emit("存在报警，请先清报警"); return False
@@ -442,6 +598,8 @@ class ScaraController(QObject):
         self._stop_polling()
         self._stop_proc()
         self._connected = False
+        self._soft_estop = False
+        self._safety = {"enable": 0, "estop": False, "warn": 0, "mode": "?"}
 
 
 class _Command(QRunnable):
@@ -452,17 +610,24 @@ class _Command(QRunnable):
         self._ctrl = ctrl; self._name = name; self._line = line; self._fn = fn
 
     def run(self) -> None:
+        err = ""
         try:
             if self._fn is not None:
                 ok, _ = self._fn()
             else:
                 out = self._ctrl._send(self._line)
                 ok = ScaraController._ok(out)
+                if not ok:
+                    err = (out or "").strip()[:160] or "无输出"
+                    self._ctrl.error_occurred.emit(f"{self._name}失败: {err}")
         except Exception as exc:  # pragma: no cover
             ok = False
-        self._ctrl.command_finished.emit(self._name, bool(ok), "")
+            err = str(exc)
+            self._ctrl.error_occurred.emit(f"{self._name}异常: {exc}")
+        self._ctrl.command_finished.emit(self._name, bool(ok), err)
         st = self._ctrl.read_all_sync()
         if st is not None:
+            self._ctrl._last_status = st
             self._ctrl.status_updated.emit(st)
 
 
