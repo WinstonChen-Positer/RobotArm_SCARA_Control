@@ -10,7 +10,7 @@
 
 每次准备写新功能或修 Bug 前，先在项目根目录下打开终端（Terminal / PowerShell），依次运行：
 
-` ` `bash
+```bash
 # 1. 切换到 main 分支
 git checkout main
 
@@ -19,7 +19,7 @@ git pull
 
 # 3. 创建并切换到你的新分支（请将 my-new-feature 换成你这次改动的名字）
 git checkout -b feature/你的功能名称
-` ` `
+```
 
 > 💡 **为什么要建分支？** 
 > 这样你在本地哪怕写崩了代码，也绝对不会影响到主线 `main` 的正常运行！
@@ -30,13 +30,13 @@ git checkout -b feature/你的功能名称
 
 在编辑器里改好代码、并测试无误后：
 
-` ` `bash
+```bash
 # 1. 把所有修改过的文件放入暂存区
 git add .
 
 # 2. 填写这次修改了什么（提交说明）
 git commit -m "简短说明你改了什么，例如：修复了水泵控制按钮卡死的bug"
-` ` `
+```
 
 ---
 
@@ -44,9 +44,9 @@ git commit -m "简短说明你改了什么，例如：修复了水泵控制按�
 
 把你在本地写好的分支上传到 GitHub：
 
-` ` `bash
+```bash
 git push -u origin feature/你的功能名称
-` ` `
+```
 *(注意：请把 `feature/你的功能名称` 替换成你在第一步里起的分支名字)*
 
 ---
