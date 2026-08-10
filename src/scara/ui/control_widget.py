@@ -30,6 +30,7 @@ from robot_arm.ui import theme as T
 
 logger = get_logger("scara.ui")
 
+# 泵/阀 DO 映射文件（进程工作目录；与 scara_presets.json 同级）。只存 kind/name/ch，不存电平。
 DO_MAP_FILE = "scara_do_map.json"
 
 JOINT_NAME = ["J1", "J2", "J3", "J4"]
@@ -116,6 +117,8 @@ QLineEdit, QDoubleSpinBox, QSpinBox, QComboBox {{
     min-height:20px; padding:2px 6px;
     background:{_D['input_bg']}; color:{_D['text']};
     border:1px solid {_D['border']}; border-radius:6px; }}
+QLineEdit:disabled, QDoubleSpinBox:disabled, QSpinBox:disabled, QComboBox:disabled {{
+    color:{_D['muted']}; background:#1a2332; border-color:#243044; }}
 QComboBox::drop-down {{ border:none; }}
 QComboBox QAbstractItemView {{
     background:{_D['card']}; color:{_D['text']}; selection-background-color:{_D['primary']}; }}
@@ -204,10 +207,14 @@ class ScaraControlWidget(QWidget):
         self._pose_v: list[QLabel] = []
         self._light: dict[str, QLabel] = {}
         self._io_cells: list[QFrame] = []
+        # DO 行：{kind, name, ch, widget, lvl, applied}；applied=已真正下发的电平
         self._do_entries: list[dict] = []
 
         self._build()
         self._load_do_map()
+        # 主界面启动时向硬件写一遍 0（镜像窗 owns=False，避免重复抢连接）
+        if self._owns:
+            self._zero_all_dos("启动")
         self._bind()
         for b in self.findChildren(QPushButton):   # 所有按钮去掉点击后的焦点虚线框
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -323,6 +330,7 @@ class ScaraControlWidget(QWidget):
         row.addWidget(self._preset_combo, 1); row.addWidget(self._btn_goto); row.addWidget(self._btn_del_preset)
         g.addLayout(row); v.addWidget(f)
 
+        # DO接口：泵/阀两列；映射持久化到 scara_do_map.json；电平改后须回车才下发
         f, g = _card("DO接口")
         row = QHBoxLayout()
         self._btn_add_do = _btn("新建", "primary")
@@ -342,10 +350,13 @@ class ScaraControlWidget(QWidget):
             cols.addWidget(box, 1)
         g.addLayout(cols)
         tip = QLabel(
-            "1/0 = 高/低电平；改后按回车才写入控制器。重启界面电平归零为 0。"
-            " 写 DO 会另连控制器；机械臂已连接时可能失败，请先断开机械臂。"
+            "须连接机械臂后才能新建/改电平/删除。"
+            " 1/0 = 高/低电平；改后按回车才写入。"
+            " 启动/连接前/断开后/急停/退出会自动把全部 DO 写成 0。"
+            " 写 DO 会另连控制器，已连接时写入可能失败（界面仍要求先连接，安全优先）。"
         )
         tip.setObjectName("muted"); tip.setWordWrap(True)
+        self._do_tip = tip
         g.addWidget(tip)
         v.addWidget(f)
 
@@ -438,12 +449,12 @@ class ScaraControlWidget(QWidget):
     # ------------------------------------------------------------------ #
     def _bind(self) -> None:
         self._btn_conn.clicked.connect(self._on_connect_clicked)
-        self._btn_disc.clicked.connect(self._ctrl.disconnect)
+        self._btn_disc.clicked.connect(self._on_disconnect_clicked)
         self._btn_en.clicked.connect(self._ctrl.cmd_enable)
         self._btn_dis.clicked.connect(self._ctrl.cmd_disable)
         self._btn_clr.clicked.connect(self._ctrl.cmd_clear_alarm)
         self._btn_home.clicked.connect(self._on_home_clicked)
-        self._btn_estop.clicked.connect(self._ctrl.emergency_stop)
+        self._btn_estop.clicked.connect(self._on_estop_clicked)
         self._mode_grp.idClicked.connect(lambda i: self._ctrl.cmd_set_mode(["T1", "T2", "Execute"][i]))
         self._speed.valueChanged.connect(lambda val: self._ctrl.cmd_set_speed(val))
         self._btn_save_preset.clicked.connect(self._on_save_preset)
@@ -515,7 +526,31 @@ class ScaraControlWidget(QWidget):
         btn.setProperty("cssClass", css)
         btn.style().unpolish(btn); btn.style().polish(btn)
 
+    def _reset_do_ui_to_zero(self) -> None:
+        """只改界面显示与 applied，不写硬件。"""
+        for e in self._do_entries:
+            e["applied"] = 0
+            lvl = e["lvl"]
+            lvl.blockSignals(True)
+            lvl.setValue(0)
+            lvl.blockSignals(False)
+
+    def _zero_all_dos(self, reason: str = "") -> None:
+        """安全清零：界面归零 + 同步把已配置通道写成 0（真关泵/阀）。"""
+        self._reset_do_ui_to_zero()
+        chs = [e["ch"] for e in self._do_entries]
+        if not chs:
+            return
+        tag = f"清零DO({reason})" if reason else "清零DO"
+        ok, msg = self._ctrl.zero_do_channels_sync(chs)
+        if ok:
+            self._append("信息", f"{tag} 完成", _D["text2"])
+        else:
+            self._append("错误", f"{tag} 失败: {(msg or '').strip()[:160]}", _D["error"])
+
     def _load_do_map(self) -> None:
+        """从 scara_do_map.json 恢复泵/阀列表；电平不恢复（一律按 0 显示）。
+        无 kind/name/ch 的条目（如 example 里的 _note）会跳过。"""
         p = Path(DO_MAP_FILE)
         if not p.is_file():
             return
@@ -547,6 +582,7 @@ class ScaraControlWidget(QWidget):
             self._add_do_row(kind, name.strip(), ch)
 
     def _save_do_map(self) -> None:
+        """新建/删除后写入 scara_do_map.json（只存映射，不存 0/1）。"""
         data = [{"kind": e["kind"], "name": e["name"], "ch": e["ch"]} for e in self._do_entries]
         try:
             Path(DO_MAP_FILE).write_text(
@@ -556,6 +592,7 @@ class ScaraControlWidget(QWidget):
             logger.warning("写入 scara_do_map.json 失败: %s", exc)
 
     def _apply_do_level(self, entry: dict) -> None:
+        """回车确认：才把当前 0/1 下发到控制器。"""
         lvl = entry["lvl"]
         v = lvl.value()
         if v not in (0, 1):
@@ -567,6 +604,7 @@ class ScaraControlWidget(QWidget):
         self._ctrl.cmd_set_do(entry["ch"], v)
 
     def _revert_do_level_if_needed(self, entry: dict) -> None:
+        """失焦但未按回车：还原为上次已下发电平，避免误触写入。"""
         lvl = entry["lvl"]
         if lvl.value() == entry["applied"]:
             return
@@ -575,6 +613,7 @@ class ScaraControlWidget(QWidget):
         lvl.blockSignals(False)
 
     def _delete_do_row(self, entry: dict) -> None:
+        """删除一行映射并更新 JSON；不自动写 DO。"""
         ans = QMessageBox.question(
             self, "删除 DO 接口",
             f"确认删除「{entry['name']}」（DO{entry['ch']}）？",
@@ -587,7 +626,19 @@ class ScaraControlWidget(QWidget):
         entry["widget"].deleteLater()
         self._save_do_map()
 
+    def _set_do_ui_enabled(self, enabled: bool) -> None:
+        """未连接时整块 DO 界面锁定（不能新建/改电平/删除）；安全清零仍可写硬件。"""
+        self._btn_add_do.setEnabled(enabled)
+        for e in self._do_entries:
+            e["lvl"].setEnabled(enabled)
+            e["del_btn"].setEnabled(enabled)
+        if hasattr(self, "_do_tip"):
+            self._do_tip.setStyleSheet(
+                f"color:{_D['text2']};" if enabled else f"color:{_D['warning']};"
+            )
+
     def _add_do_row(self, kind: str, name: str, ch: int) -> None:
+        """在泵/阀列追加一行：名称、DO 号、0/1（回车写入）、删除。"""
         row_w = QWidget()
         row = QHBoxLayout(row_w); row.setContentsMargins(0, 0, 0, 0); row.setSpacing(4)
         name_lbl = QLabel(name); name_lbl.setObjectName("kv")
@@ -595,12 +646,19 @@ class ScaraControlWidget(QWidget):
         lvl = QSpinBox(); lvl.setRange(0, 1); lvl.setFixedWidth(44)
         lvl.setKeyboardTracking(False)
         lvl.setValue(0)
-        lvl.setToolTip("0=低电平  1=高电平；按回车写入")
-        entry: dict = {"kind": kind, "name": name, "ch": ch, "widget": row_w, "lvl": lvl, "applied": 0}
+        lvl.setToolTip("0=低电平  1=高电平；按回车写入（须已连接）")
+        del_btn = _btn("删")
+        entry: dict = {
+            "kind": kind, "name": name, "ch": ch,
+            "widget": row_w, "lvl": lvl, "del_btn": del_btn, "applied": 0,
+        }
         lvl.lineEdit().returnPressed.connect(lambda: self._apply_do_level(entry))
         lvl.lineEdit().editingFinished.connect(lambda: self._revert_do_level_if_needed(entry))
-        del_btn = _btn("删")
         del_btn.clicked.connect(lambda _, e=entry: self._delete_do_row(e))
+        # 跟随当前连接状态：未连接时新建按钮本就禁用，这里仍按状态设，避免误开
+        can_edit = self._ctrl.is_connected()
+        lvl.setEnabled(can_edit)
+        del_btn.setEnabled(can_edit)
         row.addWidget(name_lbl); row.addWidget(do_lbl); row.addStretch(1)
         row.addWidget(lvl); row.addWidget(del_btn)
         col = self._do_pump_col if kind == "pump" else self._do_valve_col
@@ -608,6 +666,7 @@ class ScaraControlWidget(QWidget):
         self._do_entries.append(entry)
 
     def _show_add_do_dialog(self) -> None:
+        """新建对话框。校验通过时先记下 kind/name/ch，再关窗——避免关窗后下拉框回到默认「泵」。"""
         dlg = QDialog(self)
         dlg.setWindowTitle("新建 DO 接口")
         v = QVBoxLayout(dlg)
@@ -615,6 +674,7 @@ class ScaraControlWidget(QWidget):
         type_cb = QComboBox(); type_cb.addItems(["泵", "阀"])
         name_edit = QLineEdit(); name_edit.setPlaceholderText("自定义名称")
         do_spin = QSpinBox(); do_spin.setRange(1, 16)
+        # 加宽以便显示两位数 DO10–16；关键盘跟踪避免输入中间态
         do_spin.setMinimumWidth(56); do_spin.setKeyboardTracking(False)
         form.addWidget(QLabel("类型"), 0, 0); form.addWidget(type_cb, 0, 1)
         form.addWidget(QLabel("名称"), 1, 0); form.addWidget(name_edit, 1, 1)
@@ -667,8 +727,20 @@ class ScaraControlWidget(QWidget):
         # 连接握手（启动 snrobot.exe + 读状态）是阻塞 I/O：若在 GUI 线程直接跑，
         # exe 卡住（如控制器上电未就绪/网络挂起）会冻结整个界面，连急停都点不动。
         # 改用 connect_async 放后台线程；结果经 connection_changed 信号回 UI。
+        # 连接前先清零 DO（此时 snrobot 未占连接，scara_do 更容易成功）。
         self._btn_conn.setEnabled(False)
+        self._zero_all_dos("连接前")
         self._ctrl.connect_async()
+
+    def _on_disconnect_clicked(self) -> None:
+        # 先断 snrobot，再清零 DO（此时不再抢连接）
+        self._ctrl.disconnect()
+        self._zero_all_dos("断开后")
+
+    def _on_estop_clicked(self) -> None:
+        # 界面立刻归零；硬件清零放在急停线程里（断 serve → estop → 写 DO=0 → 再拉起）。
+        self._reset_do_ui_to_zero()
+        self._ctrl.emergency_stop([e["ch"] for e in self._do_entries])
 
     def _on_conn(self, ok: bool) -> None:
         self._conn_chip.setText("● 已连接" if ok else "● 未连接")
@@ -682,6 +754,8 @@ class ScaraControlWidget(QWidget):
         # 未连接时控制类按钮全部置灰；已连接时去使能保持可点（不因灯显示 OFF 而灰掉）
         for b in (self._btn_en, self._btn_dis, self._btn_clr, self._btn_home, self._btn_estop):
             b.setEnabled(ok)
+        # DO：未连接时整块锁定，避免不经 snrobot 就能改泵/阀；清零路径不受影响
+        self._set_do_ui_enabled(ok)
         if not ok:
             self._set_css(self._btn_en, "")
             self._set_css(self._btn_clr, "")
@@ -746,6 +820,11 @@ class ScaraControlWidget(QWidget):
 
     def cleanup(self) -> None:
         try:
+            # 主界面退出：先断 snrobot，再清零 DO，避免抢连接导致关泵失败。
+            if self._owns:
+                if self._ctrl.is_connected():
+                    self._ctrl.disconnect()
+                self._zero_all_dos("退出")
             if self._cam is not None:
                 self._cam.stop(); self._cam = None
             if self._owns:

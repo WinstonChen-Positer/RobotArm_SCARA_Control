@@ -21,6 +21,7 @@ from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal, QRunnable, QThrea
 from utils import get_logger
 from scara.config.scara_config import ScaraConfig
 from scara.controller.do_client import set_uo_level as do_set_uo_level
+from scara.controller.do_client import zero_channels as do_zero_channels
 from scara.controller import enable_client as en_client
 
 logger = get_logger("scara.controller")
@@ -451,7 +452,10 @@ class ScaraController(QObject):
         v = self._cfg.clamp_speed(pct)  # 钳到 [min,max]，防非UI/未来调用越界下发（clamp_speed 原为死代码）
         self._submit(f"速度 {v}%", f"setspeed {v}")
     def cmd_set_do(self, i, level):
-        """走 scara_do.exe（方案 C）。level 为 0 或 1（UO 电平）。会另开连接，与 snrobot serve 互斥。"""
+        """异步写单个 DO：走 scara_do.exe。level 为 0 或 1。
+
+        会另开控制器连接，与 snrobot serve 互斥；已连接时仅警告，仍尝试写入。
+        """
         ch, val = int(i), 1 if int(level) else 0
         name = f"DO[{ch}]={val}"
         if self._connected:
@@ -468,6 +472,44 @@ class ScaraController(QObject):
             return ok, msg
 
         self._pool.start(_Command(self, name, None, fn=_fn))
+
+    def zero_do_channels_sync(self, channels: List[int]) -> Tuple[bool, str]:
+        """同步把若干 DO 写成 0（安全清零）。
+
+        若 snrobot 已连接：临时断 serve → 写 0 → 再拉起（与 scara_enable 共用互斥锁）。
+        调用方：UI 启动/连接前/断开后/退出；急停线程在 estop 之后也会调用。
+        """
+        chs = sorted({int(c) for c in channels if 1 <= int(c) <= 16})
+        if not chs:
+            return True, "no channels"
+        with self._enable_exe_lock:
+            was_connected = self._connected
+            if was_connected:
+                self._stop_polling()
+                self._stop_proc()
+            try:
+                ok, out = do_zero_channels(chs)
+            except Exception as exc:  # noqa: BLE001
+                ok, out = False, str(exc)
+            if was_connected:
+                if not self._start_proc():
+                    self._connected = False
+                    if self._last_status:
+                        self._last_status = self._merge_safety(dict(self._last_status))
+                        self.status_updated.emit(self._last_status)
+                    self.error_occurred.emit("清零 DO 后重新连接 snrobot 失败")
+                    self.connection_changed.emit(False)
+                    return ok, out
+                st = self.read_all_sync()
+                if st is not None:
+                    self._last_status = st
+                    self.status_updated.emit(st)
+                elif self._last_status:
+                    self._last_status = self._merge_safety(dict(self._last_status))
+                    self.status_updated.emit(self._last_status)
+                self._start_polling()
+            return ok, out
+
     def cmd_home(self):          self._submit("回零", "home", need_motion=True)
 
     def cmd_move_joint(self, joint: int, delta: float):
@@ -501,8 +543,9 @@ class ScaraController(QObject):
         code = CART_AXIS[axis.upper()] if isinstance(axis, str) else JOINT_AXIS[int(axis)]
         self._submit("jog停", f"jogstop {code}")
 
-    def emergency_stop(self):
-        """急停：scara_enable estop（Send_Stop）。先软锁存亮灯，再断 serve 发命令。"""
+    def emergency_stop(self, do_channels: Optional[List[int]] = None):
+        """急停：scara_enable estop（Send_Stop）。先软锁存亮灯，再断 serve 发命令。
+        若传入 do_channels，急停后把这些 DO 同步写成 0（关泵/阀）。"""
         self._soft_estop = True
         self.warning_occurred.emit("急停触发")
         snap = dict(self._last_status) if self._last_status else {
@@ -517,6 +560,7 @@ class ScaraController(QObject):
         snap["need_clear"] = True
         self._last_status = snap
         self.status_updated.emit(snap)
+        channels = list(do_channels or [])
 
         def _fn():
             ok, out, safety = self._run_enable_exe("estop")
@@ -525,6 +569,14 @@ class ScaraController(QObject):
             if not ok:
                 self.error_occurred.emit(
                     f"急停失败: {(out or '').strip()[:160] or '无输出'}")
+            if channels:
+                zok, zmsg = self.zero_do_channels_sync(channels)
+                if not zok:
+                    self.error_occurred.emit(
+                        f"急停后清零 DO 失败: {(zmsg or '').strip()[:160]}")
+                    ok = False
+                else:
+                    self.info_occurred.emit("急停后已清零全部 DO")
             return ok, out or ""
         self._pool.start(_Command(self, "急停", None, fn=_fn))
 

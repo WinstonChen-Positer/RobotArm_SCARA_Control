@@ -46,7 +46,15 @@ python main.py --no-services
 
 1. 确认桥程序位于 `C:\software\SNRobotLab\snrobot.exe`。该目录内含 RobotCommunication SDK 与许可证 `SiaSunRobot.lic`，**exe 必须与许可证同目录运行**，不能单独拷走。
 2. 在「SCARA 机械臂」页点连接。连接参数（桥路径、控制器地址、超时等）可在程序根目录建 `scara_config.toml` 覆盖，缺省即上述值。
-3. 泵开关走 `scara_do.exe`（须与 `RobotSDK.dll`、许可证同目录，默认 `D:\SNRobotLab`）。界面「泵 / DO（scara_do）」卡片可开泵/停泵；也可用 `tools/test_scara_pump_pulse.py` 做脉冲测试。
+3. **DO 接口（泵/阀）**走 `scara_do.exe`（须与 `RobotSDK.dll`、许可证同目录，默认 `D:\SNRobotLab`）。
+   - 界面「DO接口」卡片：左列泵、右列阀；点「新建」绑定名称与 DO 号（1–16）。
+   - **须先连接机械臂**后才能新建 / 改电平 / 删除（未连接时整块锁定）。原因：真机上可不经 `snrobot` 直接写 DO，界面禁止未连接时改，避免误开泵/阀。
+   - 改 0/1 后须**按回车**才写入控制器（防误触）；`0`=低电平，`1`=高电平。
+   - 映射保存在程序根目录 `scara_do_map.json`（格式见 `scara_do_map.example.json`），**不保存电平**。
+   - **安全清零**：启动、点「连接」前、点「断开」后、急停、退出软件时，会把已配置的全部 DO **真正写成 0**（关泵/阀）。只改界面数字不算数；清零不受上述锁定影响。
+   - 写 DO 会另开控制器连接，与机械臂 `snrobot` 连接可能互斥；已连接时手动写入偶发失败可接受（安全优先于测 DO 方便）。
+   - 脉冲测试也可用 `tools/DOtest/test_scara_pump_pulse.py`。
+4. 安全相关：急停会先停臂再清零 DO；页面底部急停按钮保持可用。
 
 ## 安全提示
 
@@ -54,6 +62,7 @@ python main.py --no-services
 - DUCO 碰撞报警后需在示教器上复位，软件无法清除。
 - SCARA 运动前确认已使能、模式正确（T1 示教限速，T2 全速默认禁用）。
 - 页面上的使能（伺服上电）会让机械臂带电，属于需谨慎确认的动作。
+- 泵/阀靠 DO 电平保持：关软件不会自动掉电。本程序在启动/连接/断开/急停/退出时会主动把已配置 DO 写成 0；若清零失败，请看日志并用示教器或手动断电确认泵已停。
 
 ## 目录说明
 
@@ -70,6 +79,9 @@ webconsole/
   server.py             armweb 机械臂代理（HTTP → thrift → 真机）
   index.html            armweb 浏览器控制台页面
 tools/scara_do/         SCARA 泵/阀 UO 控制小工具（编译为 scara_do.exe）
+tools/DOtest/           DO 脉冲测试脚本
+scara_do_map.json       运行时生成：泵/阀名称与 DO 号映射（不入库也无妨）
+scara_do_map.example.json  DO 映射格式示例
 ```
 
 说明：
@@ -77,3 +89,4 @@ tools/scara_do/         SCARA 泵/阀 UO 控制小工具（编译为 scara_do.ex
 - `src/devices/robot_arm/calib/joint_replay/`（自动流程专用的关节回放数据）未随本程序打包，两个页面本身不读它。
 - SCARA 送检取放序列中的"切换物镜倍率"步骤依赖显微镜预设文件（`presets/*.json`），本程序不含显微镜模块，该步骤会跳过并报缺文件提示，其余步骤不受影响。
 - 相机画面为懒加载（首次打开时 import cv2），无相机不影响机械臂控制。
+- `scara_do_map.json` 只存「有哪些口」，不存当前 0/1；每次进入界面电平均按 0 显示，并会尝试向硬件写一遍 0。
