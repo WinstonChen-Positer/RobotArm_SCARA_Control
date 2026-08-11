@@ -1,6 +1,6 @@
-"""调用 D:\\SNRobotLab\\scara_enable.exe（直调 RobotSDK.dll）。
+"""调用 scara_enable.exe（直调 RobotSDK.dll）。
 
-命令名对应官方 UI 含义；底层 DLL 函数见各函数注释。
+独立测试脚本：路径与 main.py 相同，读仓库根目录 local_config.toml。
 前提：关掉官方 SCARA GUI 和本程序 snrobot serve（会抢连接）。
 """
 from __future__ import annotations
@@ -8,30 +8,44 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
-_DEFAULT_SDK = Path(os.environ.get("SNROBOTLAB_DIR", r"D:\SNRobotLab"))
+_ROOT = Path(__file__).resolve().parents[2]
+_SRC = _ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from scara.config.scara_config import resolve_snrobotlab_dir  # noqa: E402
 
 
 def sdk_dir() -> Path:
-    return Path(os.environ.get("SNROBOTLAB_DIR", str(_DEFAULT_SDK)))
+    env = os.environ.get("SNROBOTLAB_DIR", "").strip()
+    if env:
+        return Path(env)
+    return resolve_snrobotlab_dir()
 
 
 def exe_path() -> Path:
-    env = os.environ.get("SCARA_ENABLE_EXE")
+    env = os.environ.get("SCARA_ENABLE_EXE", "").strip()
     if env:
         return Path(env)
     return sdk_dir() / "scara_enable.exe"
 
 
 def _active_ip_port() -> Tuple[str, int]:
+    from scara.config.scara_config import load_scara_config
+
     cfg = sdk_dir() / "WorkStationConfig.json"
-    rows = json.loads(cfg.read_text(encoding="utf-8"))
-    for row in rows:
-        if row.get("Active"):
-            return str(row["IP"]), int(row["Port"])
-    raise RuntimeError(f"{cfg} 没有 Active 工位")
+    if cfg.is_file():
+        rows = json.loads(cfg.read_text(encoding="utf-8"))
+        for row in rows:
+            if row.get("Active"):
+                return str(row["IP"]), int(row["Port"])
+        raise RuntimeError(f"{cfg} 没有 Active 工位")
+    sc = load_scara_config()
+    return str(sc.controller_ip), int(sc.controller_port)
 
 
 def run_cmd(
@@ -41,11 +55,14 @@ def run_cmd(
     port: Optional[int] = None,
 ) -> Tuple[bool, str]:
     """跑 scara_enable.exe；成功返回 (True, 输出)，失败 (False, 输出/错误)。"""
-    exe = exe_path()
+    try:
+        exe = exe_path()
+    except FileNotFoundError as exc:
+        return False, str(exc)
     if not exe.is_file():
         return False, (
-            f"找不到 {exe}。请先运行 tools\\scara_enable\\build.bat "
-            f"（会编译并复制到 {sdk_dir()}）"
+            f"找不到 {exe}。请把 tools\\scara_enable\\scara_enable.exe "
+            f"复制到 {sdk_dir()}（见 local_config.toml / 路径硬编码清单.md）"
         )
     if ip is None or port is None:
         ip, port = _active_ip_port()
@@ -69,66 +86,24 @@ def run_cmd(
 
 
 def status(**kw) -> Tuple[bool, str]:
-    """读当前状态：使能 / 急停 / 报警 / 操作模式。
-
-    DLL: Read_PowerOn, Read_Stop, Read_Warning, ReadCurMode
-    """
     return run_cmd("status", **kw)
 
 
 def enable(**kw) -> Tuple[bool, str]:
-    """使能（官方 UI「使能」变 ON）。
-
-    DLL: 必要时先 SetMode(1=T1)，再
-         Send_PowerOn（按下上电请求）→ Reset_PowerOn（松开）。
-    注意：必须成对脉冲；只 Send 不 Reset 会在清报警后自动使能。
-    """
     return run_cmd("enable", **kw)
 
 
 def disable(**kw) -> Tuple[bool, str]:
-    """去使能（官方 UI「使能」变 OFF），不触发急停/报警。
-
-    DLL: SetMode 来回切一次，最后回到原模式：
-         - 当前 T1/T2 → 切到执行 → 切回原 T1/T2
-         - 当前执行   → 切到 T1  → 切回执行
-    """
     return run_cmd("disable", **kw)
 
 
 def set_mode(mode: int, **kw) -> Tuple[bool, str]:
-    """切换操作模式。
-
-    mode: 1=T1示教, 2=T2示教, 3=执行, 4=远程
-    DLL: SetMode(mode)
-    """
     return run_cmd("set_mode", str(int(mode)), **kw)
 
 
 def estop(**kw) -> Tuple[bool, str]:
-    """急停：急停 ON，并通常伴随报警。
-
-    DLL: Send_Stop
-    """
     return run_cmd("estop", **kw)
 
 
-def release_estop(**kw) -> Tuple[bool, str]:
-    """仅解除急停（急停 OFF）。不保证报警也清掉。
-
-    DLL: Reset_Stop
-    完整「清报警」请用 clear_alarm。
-    """
-    return run_cmd("release_estop", **kw)
-
-
 def clear_alarm(**kw) -> Tuple[bool, str]:
-    """清报警：急停变 OFF + 运行状态变正常（对齐官方清报警）。
-
-    顺序:
-      1) 若急停 ON → Reset_Stop，等到 Read_Stop=OFF
-      2) Send_Reset → Reset_Reset（报警复位脉冲；必要时两拍）
-      3) 仍报警时再试 ClearAlarm + 一拍
-    注意：急停仍 ON 时，报警无法变回正常。
-    """
     return run_cmd("clear_alarm", **kw)

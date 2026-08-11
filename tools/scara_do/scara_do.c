@@ -7,7 +7,8 @@
  *         WriteUO(ch, 0|1)       写 UO 电平（0 或 1，由命令行传入）
  * 以后可在本 exe 里继续加其它 SDK 导出函数（读 IO、其它 UO 等）。
  *
- * 本 exe 必须放在 D:\SNRobotLab（与 SysConfig.xml / 许可同目录）。
+ * 本 exe 不硬编码盘符：运行时用自身所在目录找 RobotSDK.dll / 工位配置。
+ * 请把它放到与 RobotSDK.dll、许可证同目录（通常是 SNRobotLab 安装目录）。
  * 用法: scara_do.exe set <通道> <0|1> [--ip IP] [--port PORT]
  *       scara_do.exe ping [--ip IP] [--port PORT]
  */

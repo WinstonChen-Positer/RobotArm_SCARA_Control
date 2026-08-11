@@ -42,11 +42,13 @@ python main.py --no-services
 
 ## SCARA 真机连接
 
-连接链路：本页面 → 命令行桥 `snrobot.exe` → 控制器 192.168.1.100:20002。
+连接链路：本页面 → 命令行桥 `snrobot.exe` → 控制器（工位配置里的 IP，常见 192.168.1.100:20002）。
 
-1. 确认桥程序位于 `C:\software\SNRobotLab\snrobot.exe`。该目录内含 RobotCommunication SDK 与许可证 `SiaSunRobot.lic`，**exe 必须与许可证同目录运行**，不能单独拷走。
-2. 在「SCARA 机械臂」页点连接。连接参数（桥路径、控制器地址、超时等）可在程序根目录建 `scara_config.toml` 覆盖，缺省即上述值。
-3. **DO 接口（泵/阀）**走 `scara_do.exe`（须与 `RobotSDK.dll`、许可证同目录，默认 `D:\SNRobotLab`）。
+**换电脑时路径怎么改**：复制 [`local_config.example.toml`](local_config.example.toml) 为 `local_config.toml`，改 `[paths] snrobotlab_dir`。详见 [`路径硬编码清单.md`](路径硬编码清单.md) / [`换机路径说明.md`](换机路径说明.md)。并把 `tools/scara_do/scara_do.exe`、`tools/scara_enable/scara_enable.exe` 拷进该目录（无需 C 编译器）。
+
+1. 确认桥程序与许可证同目录（路径写在 `local_config.toml`）。该目录内含 RobotCommunication SDK 与许可证 `SiaSunRobot.lic`，**exe 必须与许可证同目录运行**，不能单独拷走。
+2. 在「SCARA 机械臂」页点连接。连接参数由 `local_config.toml` 的 `[paths]` / `[scara]` 决定。
+3. **DO 接口（泵/阀）**走 `scara_do.exe`（须与 `RobotSDK.dll`、许可证同目录，与 `snrobotlab_dir` 相同）。
    - 界面「DO接口」卡片：左列泵、右列阀；点「新建」绑定名称与 DO 号（1–16）。
    - **须先连接机械臂**后才能新建 / 改电平 / 删除（未连接时整块锁定）。原因：真机上可不经 `snrobot` 直接写 DO，界面禁止未连接时改，避免误开泵/阀。
    - 改 0/1 后须**按回车**才写入控制器（防误触）；`0`=低电平，`1`=高电平。

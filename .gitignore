@@ -4,3 +4,4 @@ _smoke/
 __pycache__/
 *.pyc
 .env
+local_config.toml

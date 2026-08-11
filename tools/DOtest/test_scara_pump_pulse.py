@@ -10,20 +10,16 @@
 """
 from __future__ import annotations
 
-import importlib.util
 import sys
 import time
 from pathlib import Path
 
-_CLIENT = Path(__file__).resolve().parents[1] / "src" / "scara" / "controller" / "do_client.py"
+_ROOT = Path(__file__).resolve().parents[2]
+_SRC = _ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
-
-def _load_client():
-    spec = importlib.util.spec_from_file_location("do_client", _CLIENT)
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    return mod
+from scara.controller import do_client as client  # noqa: E402
 
 
 def main() -> int:
@@ -33,7 +29,6 @@ def main() -> int:
         print("ERR 保持时间不能为负")
         return 1
 
-    client = _load_client()
     on_lv, off_lv = client.UO_LEVEL_ON, client.UO_LEVEL_OFF
 
     print(f"--- 开泵 UO[{ch}]={on_lv} ---")

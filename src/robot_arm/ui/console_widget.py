@@ -987,6 +987,7 @@ QLabel#wpSub {{ color: {_C_TX3}; font-family: {MONO}; font-size: 11px; }}
 # 自测
 # ════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
+    # HARDCODED_PATH: 仅本文件单独自测截图用，不影响 python main.py
     sys.path.insert(0, "G:/2D_robotics/2D_robotics/src")
 
     from PyQt6.QtCore import QTimer
@@ -999,6 +1000,7 @@ if __name__ == "__main__":
     w.setWindowTitle("机械臂控制台")
     w.show()
 
+    # HARDCODED_PATH: 仅本文件单独自测截图用，不影响 python main.py
     shot_path = "G:/2D_robotics/2D_robotics/tools/_shots/console_widget_test.png"
 
     def _grab_and_quit():

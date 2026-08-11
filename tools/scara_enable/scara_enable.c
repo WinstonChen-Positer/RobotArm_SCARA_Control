@@ -9,7 +9,8 @@
  *   解除急停     = Reset_Stop
  *   清报警       = 先急停 OFF，再 Send_Reset→Reset_Reset（可两拍）
  *
- * 本 exe 必须放在 D:\SNRobotLab。
+ * 本 exe 不硬编码盘符：运行时用自身所在目录找 RobotSDK.dll / 工位配置。
+ * 请把它放到与 RobotSDK.dll、许可证同目录（通常是 SNRobotLab 安装目录）。
  *
  * 用法:
  *   scara_enable.exe status|ping [--ip IP] [--port PORT]

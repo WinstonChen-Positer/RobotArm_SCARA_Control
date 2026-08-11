@@ -54,6 +54,8 @@ class ScaraController(QObject):
         self._cfg = config or ScaraConfig()
         self._proc: Optional[subprocess.Popen] = None
         self._io_lock = threading.Lock()        # 串行化对 serve 进程的读写
+        # scara_enable / scara_do 都会临时断 snrobot：同一把锁防止两路同时抢控制器
+        self._enable_exe_lock = threading.Lock()
         self._connected = False
         self._connecting = False                 # connect_async 在途标志，防重入起双进程
         self._last_status: dict = {}
@@ -138,14 +140,31 @@ class ScaraController(QObject):
             self._rx.put(None)
 
     def _start_proc(self) -> bool:
+        if not self._cfg.exe_dir:
+            self.error_occurred.emit(
+                "未配置 SNRobotLab 目录：请复制 local_config.example.toml 为 "
+                "local_config.toml，并填写 [paths] snrobotlab_dir。详见 路径硬编码清单.md"
+            )
+            return False
+        exe = Path(self._cfg.exe_path)
+        if not exe.is_file():
+            self.error_occurred.emit(
+                f"找不到 snrobot.exe：{exe}\n"
+                f"请确认 local_config.toml 的 [paths] snrobotlab_dir 正确，"
+                f"且该目录含 snrobot.exe、RobotSDK.dll、许可证。"
+            )
+            return False
         try:
             self._proc = subprocess.Popen(
-                [self._cfg.exe_path, "serve"], cwd=self._cfg.exe_dir,
+                [str(exe), "serve"], cwd=str(exe.parent),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except Exception as exc:
-            self.error_occurred.emit(f"启动 snrobot.exe 失败: {exc}")
+            self.error_occurred.emit(
+                f"启动 snrobot.exe 失败: {exc}\n"
+                f"当前路径: {exe}（exe_dir={self._cfg.exe_dir}）"
+            )
             return False
 
         # 读取线程随进程一起起；握手也走队列 —— 原来直接 for raw in stdout 读握手，
@@ -268,32 +287,35 @@ class ScaraController(QObject):
 
         返回 (ok, 输出文本, 解析出的 safety dict)。
         """
-        was_connected = self._connected
-        self._stop_polling()
-        self._stop_proc()
-        ip = self._cfg.controller_ip
-        port = int(self._cfg.controller_port)
-        ok, out = en_client.run_cmd(*args, ip=ip, port=port)
-        safety = self._apply_safety_from_text(out)
-        if was_connected:
-            if not self._start_proc():
-                self._connected = False
-                if self._last_status:
-                    self._last_status = self._merge_safety(dict(self._last_status))
-                    self.status_updated.emit(self._last_status)
-                self.error_occurred.emit("scara_enable 后重新连接 snrobot 失败")
-                self.connection_changed.emit(False)
-                return ok, out, safety
-            st = self.read_all_sync()
-            if st is not None:
-                self._last_status = st
-                self.status_updated.emit(st)
-            else:
-                if self._last_status:
-                    self._last_status = self._merge_safety(dict(self._last_status))
-                    self.status_updated.emit(self._last_status)
-            self._start_polling()
-        return ok, out, safety
+        with self._enable_exe_lock:
+            was_connected = self._connected
+            self._stop_polling()
+            self._stop_proc()
+            ip = self._cfg.controller_ip
+            port = int(self._cfg.controller_port)
+            ok, out = en_client.run_cmd(
+                *args, ip=ip, port=port, sdk_dir=self._cfg.exe_dir,
+            )
+            safety = self._apply_safety_from_text(out)
+            if was_connected:
+                if not self._start_proc():
+                    self._connected = False
+                    if self._last_status:
+                        self._last_status = self._merge_safety(dict(self._last_status))
+                        self.status_updated.emit(self._last_status)
+                    self.error_occurred.emit("scara_enable 后重新连接 snrobot 失败")
+                    self.connection_changed.emit(False)
+                    return ok, out, safety
+                st = self.read_all_sync()
+                if st is not None:
+                    self._last_status = st
+                    self.status_updated.emit(st)
+                else:
+                    if self._last_status:
+                        self._last_status = self._merge_safety(dict(self._last_status))
+                        self.status_updated.emit(self._last_status)
+                self._start_polling()
+            return ok, out, safety
 
     def _refresh_safety_status(self) -> Tuple[bool, str]:
         """用 scara_enable status 校正使能/急停/报警灯。"""
@@ -464,7 +486,12 @@ class ScaraController(QObject):
             )
 
         def _fn():
-            ok, msg = do_set_uo_level(ch, val)
+            ok, msg = do_set_uo_level(
+                ch, val,
+                ip=self._cfg.controller_ip,
+                port=int(self._cfg.controller_port),
+                sdk_dir=self._cfg.exe_dir,
+            )
             if not ok:
                 self.error_occurred.emit(msg or "scara_do 失败")
             else:
@@ -488,7 +515,12 @@ class ScaraController(QObject):
                 self._stop_polling()
                 self._stop_proc()
             try:
-                ok, out = do_zero_channels(chs)
+                ok, out = do_zero_channels(
+                    chs,
+                    ip=self._cfg.controller_ip,
+                    port=int(self._cfg.controller_port),
+                    sdk_dir=self._cfg.exe_dir,
+                )
             except Exception as exc:  # noqa: BLE001
                 ok, out = False, str(exc)
             if was_connected:
